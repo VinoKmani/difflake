@@ -1,0 +1,55 @@
+# difflake.yaml
+#
+# Project-level configuration for difflake.
+# Place this file in your project root and difflake will read it automatically.
+# CLI flags always override values set here.
+#
+# Usage:
+#   difflake compare                          # reads difflake.yaml automatically
+#   difflake compare --config path/to/file    # explicit path override
+
+# Paths to the datasets being compared.
+# Supports local files, directories, S3, GCS, Azure, and HTTP URLs.
+# source: data/v1/users.parquet
+# target: data/v2/users.parquet
+
+# Primary key for row-level diff.
+# Single column:
+#   key: user_id
+# Composite key (comma-separated):
+#   key: tenant_id,order_id,event_date
+# key: user_id
+
+# Diff mode: full | schema | stats | rows
+# full    — runs schema + stats + row diff
+# schema  — column changes only, never loads row data
+# stats   — per-column drift metrics only
+# rows    — row count and key-based row diff only
+mode: full
+
+# Output format: cli | json | html | markdown
+output: cli
+
+# Output file path — required for json, html, markdown
+# out: report.html
+
+# Drift alert threshold as a fraction (0.0 to 1.0)
+# 0.15 means flag any metric that changed by more than 15%
+threshold: 0.15
+
+# Show sample added/changed/removed rows in CLI output
+verbose: false
+
+# SQL WHERE filter applied before diff — works on all formats
+# where: "status = 'active'"
+# where: "event_date >= '2024-01-01'"
+
+# Limit rows used for stats and row diff
+# Schema diff always runs on the full dataset regardless
+# sample: 500000
+
+# Use first N rows in file order (deterministic, unlike sample)
+# limit: 1000000
+
+# Columns to exclude from diff — useful for audit columns that always change
+# ignore_columns: updated_at,_etl_loaded_at,row_hash
