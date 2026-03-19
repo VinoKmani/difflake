@@ -26,6 +26,8 @@ jobs:
     environment:
       name: pypi
       url: https://pypi.org/project/difflake/
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,7 +36,4 @@ jobs:
       - name: Build
         run: pip install build twine && python -m build && twine check dist/*
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        uses: pypa/gh-action-pypi-publish@release/v1
