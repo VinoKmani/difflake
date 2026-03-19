@@ -1,0 +1,118 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "difflake"
+dynamic = ["version"]
+description = "git diff, but for your data — powered by DuckDB. Any format, any scale, any cloud."
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+authors = [
+    { name = "Vinodh Mani", email = "maintainers@difflake.io" },
+]
+
+keywords = [
+    "data-diff", "data-quality", "schema-diff",
+    "parquet", "delta-lake", "duckdb",
+    "data-engineering", "data-drift", "etl", "dbt",
+]
+
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+
+# Core deps — minimal and stable
+# DuckDB handles all format reading and query execution.
+# No Polars, Pandas, PyArrow, or per-format libraries needed at the core.
+dependencies = [
+    "duckdb>=0.10.0",
+    "click>=8.0",
+    "rich>=13.0",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+
+# Cloud storage (DuckDB httpfs extension handles auth via env vars)
+# These are optional — DuckDB auto-installs its own extensions.
+# Install these only if you need Python-level access to cloud credentials.
+s3    = ["boto3>=1.26"]
+gcs   = ["google-cloud-storage>=2.10"]
+azure = ["azure-storage-blob>=12.18", "azure-identity>=1.15"]
+cloud = ["difflake[s3,gcs,azure]"]
+
+# Database connectivity helpers (DuckDB handles the actual querying)
+postgres = ["psycopg2-binary>=2.9"]
+mysql    = ["pymysql>=1.0"]
+
+# Development
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.0",
+    "hypothesis>=6.92",
+    "ruff>=0.1.0",
+    "mypy>=1.7",
+    "build>=1.0",
+    "twine>=4.0",
+]
+
+# Everything
+all = ["difflake[cloud,postgres,mysql,dev]"]
+
+[project.scripts]
+difflake = "difflake.cli:main"
+
+[project.urls]
+Homepage      = "https://github.com/VinoKmani/difflake"
+Documentation = "https://github.com/VinoKmani/difflake#readme"
+Repository    = "https://github.com/VinoKmani/difflake"
+Issues        = "https://github.com/VinoKmani/difflake/issues"
+Changelog     = "https://github.com/VinoKmani/difflake/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "difflake/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["/difflake", "/tests", "/examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
+exclude = ["**/__pycache__", "**/*.pyc", ".github", "dist", "*.egg-info"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["difflake"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "--cov=difflake --cov-report=term-missing -v"
+
+[tool.coverage.run]
+source = ["difflake"]
+omit   = ["tests/*", "examples/*"]
