@@ -514,7 +514,7 @@ class TestReporters:
     def test_json_structure(self, tmp, base_p, evol_p):
         result = self._run(base_p, evol_p)
         out = tmp/"r.json"; result.to_json(str(out))
-        data = json.loads(out.read_text())
+        data = json.loads(out.read_text(encoding="utf-8"))
         assert all(k in data for k in ["schema_diff","stats_diff","row_diff","drift_alerts"])
 
     def test_json_string(self, base_p, evol_p):
@@ -524,7 +524,7 @@ class TestReporters:
     def test_html_renders(self, tmp, base_p, evol_p):
         result = self._run(base_p, evol_p)
         out = tmp/"r.html"; result.to_html(str(out))
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
         assert all(s in content for s in ["DiffLake","Schema Diff","Row Diff","Statistical Diff"])
 
     def test_html_no_jinja_error(self, tmp, base_p, evol_p):
@@ -572,7 +572,7 @@ class TestCLI:
                            "--mode","stats","--output","json","--out",str(out)])
         assert res.exit_code in (0,2)
         assert out.exists()
-        assert "schema_diff" in json.loads(out.read_text())
+        assert "schema_diff" in json.loads(out.read_text(encoding="utf-8"))
 
     def test_compare_html_out(self, tmp, base_p, evol_p):
         r, m = self.cli()
