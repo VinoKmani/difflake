@@ -3,5 +3,5 @@
 from difflake.core import LakeDiff
 from difflake.models import DiffResult, RowDiff, SchemaDiff, StatsDiff
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __all__ = ["LakeDiff", "DiffResult", "SchemaDiff", "StatsDiff", "RowDiff"]
