@@ -34,10 +34,9 @@ jobs:
 
       - name: Type-check with mypy
         run: mypy difflake/ --ignore-missing-imports
-        continue-on-error: true   # non-blocking until stubs are complete
 
-      - name: Run tests
-        run: pytest tests/ -v --cov=difflake --cov-report=xml
+      - name: Run tests with coverage
+        run: pytest tests/ -v --cov=difflake --cov-report=xml --cov-fail-under=80
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
