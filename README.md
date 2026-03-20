@@ -17,6 +17,8 @@ difflake compare old.parquet new.parquet
 difflake compare s3://bucket/v1/ s3://bucket/v2/ --mode stats
 difflake compare delta_v1/ delta_v2/ --key trip_id --output html --out report.html
 difflake show data.parquet --where "fare_amount > 500" --stats
+difflake validate data.parquet --min-rows 1000 --not-null user_id --unique order_id
+difflake query data.parquet "SELECT status, COUNT(*) FROM t GROUP BY 1"
 ```
 
 ---
@@ -43,6 +45,9 @@ difflake show data.parquet --where "fare_amount > 500" --stats
   - [Sort and limit](#13-sort-and-limit)
   - [Value frequencies](#14-value-frequencies)
   - [Summary line](#15-summary-line)
+  - [Data validation](#16-data-validation)
+  - [Ad-hoc SQL queries](#17-ad-hoc-sql-queries)
+  - [Structured logging](#18-structured-logging)
 - [Python API](#python-api)
 - [Exit codes](#exit-codes)
 - [Performance](#performance)
@@ -680,6 +685,93 @@ Every `compare` and `diff` run now prints a one-line summary before the full rep
 ```
 +1 col added · age type changed · +2 rows added · 3 rows changed · ⚠️ 2 drift alerts  (1.3s)
 ```
+
+---
+
+### 16. Data validation
+
+`difflake validate` checks a dataset against assertions. Exits 1 if any check fails — plug it directly into CI.
+
+```bash
+# Single file, multiple checks
+difflake validate data.parquet \
+  --min-rows 1000 \
+  --not-null user_id \
+  --not-null email \
+  --unique order_id \
+  --min-val fare_amount:0 \
+  --max-val age:120 \
+  --column-exists created_at
+
+# Pre-filter before checking
+difflake validate data.parquet --where "status = 'active'" --min-rows 500
+
+# Stop on first failure
+difflake validate data.parquet --min-rows 1000 --fail-fast
+
+# Load checks from YAML config
+difflake validate data.parquet --config difflake.yaml
+```
+
+**`difflake.yaml` validate section:**
+```yaml
+validate:
+  checks:
+    - kind: min_rows
+      value: 1000
+    - kind: not_null
+      column: user_id
+    - kind: unique
+      column: order_id
+    - kind: where_count
+      expr: "status = 'deleted'"
+      value: 0
+```
+
+**Check types:** `min_rows`, `max_rows`, `not_null`, `unique`, `min_val`, `max_val`, `column_exists`, `where_count`.
+
+---
+
+### 17. Ad-hoc SQL queries
+
+`difflake query` registers the dataset as a view named `t` and runs any SQL against it.
+
+```bash
+# Explore any file
+difflake query data.parquet "SELECT * FROM t WHERE age > 30 LIMIT 20"
+
+# Aggregate
+difflake query data.parquet "SELECT status, COUNT(*) AS n FROM t GROUP BY 1 ORDER BY 2 DESC"
+
+# Export results
+difflake query data.parquet "SELECT * FROM t" --output csv --out results.csv
+difflake query data.parquet "SELECT id, name FROM t" --output json
+
+# Limit results
+difflake query data.parquet "SELECT * FROM t" --limit 1000
+
+# Works on CSV, JSON, Delta, cloud paths — any format difflake supports
+difflake query s3://bucket/data.parquet "SELECT COUNT(*) FROM t"
+```
+
+---
+
+### 18. Structured logging
+
+Global logging flags are available on every command:
+
+```bash
+# Show INFO-level progress during a diff
+difflake --log-level INFO compare old.parquet new.parquet
+
+# JSON structured logs for log aggregation pipelines
+difflake --log-level DEBUG --log-format json compare old.parquet new.parquet
+
+# Write logs to a file
+difflake --log-level DEBUG --log-file diff.log compare old.parquet new.parquet
+```
+
+Environment variables: `DIFFLAKE_LOG_LEVEL`, `DIFFLAKE_LOG_FORMAT`, `DIFFLAKE_LOG_FILE`.
 
 ---
 

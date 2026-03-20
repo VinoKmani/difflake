@@ -6,6 +6,24 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.0] — 2026-03-19
+
+### Added
+
+- **`difflake validate`** — data quality assertion command with 7 check types: `--min-rows`, `--max-rows`, `--not-null`, `--unique`, `--min-val`, `--max-val`, `--column-exists`, `--where-count`. Supports YAML config (`difflake.yaml`), `--fail-fast`, and `--where` pre-filter. Exits 1 on failure for CI pipelines.
+- **`difflake query`** — run arbitrary SQL against any dataset using `t` as the table alias. Outputs as Rich table, JSON, or CSV (`--output cli/json/csv`). Supports `--limit`, `--no-header`, and `--out FILE`.
+- **Upgraded HTML report** — offline mode (`--offline/--no-offline`): Chart.js is embedded inline at generation time so reports work without an internet connection. Two new charts: null-rate bar chart per column and mean-drift bar chart for drifted columns. Enhanced stats table with Std Before/After, Min, Max, and inline drift reasons. Collapsible sections (`<details>`) and a real-time search filter for the stats table.
+- **Structured logging** — global `--log-level` (DEBUG/INFO/WARNING/ERROR), `--log-format` (text/json), and `--log-file` CLI flags. Text formatter uses ANSI colour and aligned columns; JSON formatter emits structured log records. Respects `DIFFLAKE_LOG_LEVEL`, `DIFFLAKE_LOG_FORMAT`, `DIFFLAKE_LOG_FILE` env vars. Key diff stages emit log events with timing and context fields.
+- **O(1)-scan batched stats** (backported from v1.0.1) — all per-column aggregations (mean, std, min, max, median) are computed in a single SQL pass using DuckDB window functions. 14–28× speedup for stats diff on large files.
+
+### Changed
+
+- `to_html()` now accepts an `offline` keyword argument (default `True`) to control Chart.js embedding.
+- HTML report title updated from `DiffLake Report` to `difflake` for consistency.
+- Test suite expanded from ~100 to 304 tests, coverage from ~75% to 93%.
+
+---
+
 ## [1.0.0] — 2025-03-13
 
 First stable release. Complete rewrite on DuckDB backend.
