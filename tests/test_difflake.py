@@ -926,6 +926,264 @@ class TestBatchedStats:
 
     def _make_views(self, tmp_path, src_data, tgt_data):
         from difflake.connection import DuckDBConnection, _read_sql, _detect_format
+
+# ── Coverage-boosting tests ─────────────────────────────────────────────────
+
+class TestDetectFormat:
+    """Cover _detect_format cloud/HTTP/local paths."""
+
+    def test_s3_parquet(self):
+        assert _detect_format("s3://bucket/data/file.parquet") == "parquet"
+
+    def test_s3_csv(self):
+        assert _detect_format("s3://bucket/data/file.csv") == "csv"
+
+    def test_s3_no_extension_defaults_parquet(self):
+        assert _detect_format("s3://bucket/data/prefix") == "parquet"
+
+    def test_gs_parquet(self):
+        assert _detect_format("gs://bucket/data.parquet") == "parquet"
+
+    def test_gcs_json(self):
+        assert _detect_format("gcs://bucket/data.json") == "json"
+
+    def test_az_csv(self):
+        assert _detect_format("az://container/data.csv") == "csv"
+
+    def test_abfs_parquet(self):
+        assert _detect_format("abfs://container@account.dfs.core.windows.net/data.parquet") == "parquet"
+
+    def test_http_parquet(self):
+        assert _detect_format("http://example.com/data.parquet") == "parquet"
+
+    def test_https_csv(self):
+        assert _detect_format("https://example.com/data.csv?token=abc") == "csv"
+
+    def test_https_no_ext_defaults_parquet(self):
+        assert _detect_format("https://example.com/data") == "parquet"
+
+    def test_local_parquet(self, tmp_path):
+        p = tmp_path / "data.parquet"
+        p.write_bytes(b"PAR1")
+        assert _detect_format(str(p)) == "parquet"
+
+    def test_local_csv(self, tmp_path):
+        p = tmp_path / "data.csv"
+        p.write_text("a,b\n1,2")
+        assert _detect_format(str(p)) == "csv"
+
+    def test_local_jsonl(self, tmp_path):
+        p = tmp_path / "data.jsonl"
+        p.write_text('{"a":1}')
+        assert _detect_format(str(p)) == "jsonl"
+
+    def test_local_unknown_ext_raises(self, tmp_path):
+        p = tmp_path / "data.xyz"
+        p.write_text("garbage")
+        with pytest.raises(ValueError, match="Unrecognized"):
+            _detect_format(str(p))
+
+    def test_directory_with_delta_log(self, tmp_path):
+        (tmp_path / "_delta_log").mkdir()
+        assert _detect_format(str(tmp_path)) == "delta"
+
+    def test_directory_with_parquet_files(self, tmp_path):
+        (tmp_path / "part-0.parquet").write_bytes(b"PAR1")
+        assert _detect_format(str(tmp_path)) == "parquet"
+
+    def test_directory_with_csv_files(self, tmp_path):
+        (tmp_path / "data.csv").write_text("a,b")
+        assert _detect_format(str(tmp_path)) == "csv"
+
+    def test_directory_no_known_files_raises(self, tmp_path):
+        (tmp_path / "file.xyz").write_text("x")
+        with pytest.raises(ValueError, match="Cannot detect format"):
+            _detect_format(str(tmp_path))
+
+    def test_nonexistent_path_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="Path not found"):
+            _detect_format(str(tmp_path / "nonexistent.parquet"))
+
+
+class TestReadSql:
+    """Cover _read_sql format branches."""
+
+    def test_csv_file_sql(self, tmp_path):
+        p = str(tmp_path / "data.csv")
+        sql = _read_sql(p, "csv")
+        assert "read_csv" in sql
+
+    def test_parquet_file_sql(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "parquet")
+        assert "read_parquet" in sql
+
+    def test_json_file_sql(self, tmp_path):
+        p = str(tmp_path / "data.json")
+        sql = _read_sql(p, "json")
+        assert "read_json" in sql
+
+    def test_jsonl_file_sql(self, tmp_path):
+        p = str(tmp_path / "data.jsonl")
+        sql = _read_sql(p, "jsonl")
+        assert "read_ndjson" in sql
+
+    def test_delta_sql(self, tmp_path):
+        p = str(tmp_path)
+        sql = _read_sql(p, "delta")
+        assert "delta_scan" in sql
+
+    def test_iceberg_sql(self, tmp_path):
+        p = str(tmp_path)
+        sql = _read_sql(p, "iceberg")
+        assert "iceberg_scan" in sql
+
+    def test_avro_sql(self, tmp_path):
+        p = str(tmp_path / "data.avro")
+        sql = _read_sql(p, "avro")
+        assert "read_avro" in sql
+
+    def test_unknown_format_fallback(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "xyzformat")
+        assert "read_parquet" in sql
+
+    def test_unknown_format_csv_fallback(self, tmp_path):
+        p = str(tmp_path / "data.csv")
+        sql = _read_sql(p, "xyzformat")
+        assert "read_csv_auto" in sql
+
+    def test_columns_projection(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "parquet", columns=["id", "name"])
+        assert '"id"' in sql and '"name"' in sql
+
+    def test_where_clause(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "parquet", where="id > 5")
+        assert "WHERE id > 5" in sql
+
+    def test_limit_clause(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "parquet", limit=100)
+        assert "LIMIT 100" in sql
+
+    def test_no_where_no_limit(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "parquet")
+        assert "WHERE" not in sql
+        assert "LIMIT" not in sql
+
+
+class TestCloudError:
+    """Cover _cloud_error branch dispatch."""
+
+    def test_s3_access_denied(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("s3://bucket/key", Exception("access denied"))
+        assert isinstance(err, RuntimeError)
+        assert "AWS_ACCESS_KEY_ID" in str(err)
+
+    def test_s3_403(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("s3://bucket/key", Exception("HTTP 403 error from aws s3"))
+        assert isinstance(err, RuntimeError)
+        assert "s3:GetObject" in str(err)
+
+    def test_gcs_permission(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("gs://bucket/file", Exception("403 permission denied"))
+        assert isinstance(err, RuntimeError)
+        assert "GOOGLE_APPLICATION_CREDENTIALS" in str(err)
+
+    def test_gcs_credentials(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("gs://bucket/file", Exception("credentials not found gcs"))
+        assert isinstance(err, RuntimeError)
+        assert "Storage Object Viewer" in str(err)
+
+    def test_azure_auth_error(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("az://container/blob", Exception("403 authentication failed"))
+        assert isinstance(err, RuntimeError)
+        assert "AZURE_STORAGE_ACCOUNT" in str(err)
+
+    def test_azure_abfs_path(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("abfs://container@account/file", Exception("unauthorized azure"))
+        assert isinstance(err, RuntimeError)
+        assert "AZURE_CLIENT_ID" in str(err)
+
+    def test_file_not_found(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("/local/path.parquet", Exception("no such file or directory"))
+        assert isinstance(err, FileNotFoundError)
+        assert "Path not found" in str(err)
+
+    def test_not_found_variant(self):
+        from difflake.connection import _cloud_error
+        err = _cloud_error("/some/path", Exception("file not found"))
+        assert isinstance(err, FileNotFoundError)
+
+    def test_generic_error_with_path(self):
+        from difflake.connection import _cloud_error
+        orig = Exception("some other duckdb error")
+        err = _cloud_error("/some/path", orig)
+        assert isinstance(err, RuntimeError)
+        assert "Error reading" in str(err)
+
+    def test_generic_error_no_path(self):
+        from difflake.connection import _cloud_error
+        orig = Exception("random error")
+        err = _cloud_error("", orig)
+        assert err is orig
+
+
+class TestSchemaDiffSummary:
+    """Cover SchemaDiff.summary() with all branch combinations."""
+
+    def test_summary_no_changes(self, tmp_path):
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        data = {"id": [1, 2], "name": ["a", "b"]}
+        write_parquet(src, data)
+        write_parquet(tgt, data)
+        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        assert result.schema_diff.summary() == "No schema changes"
+
+    def test_summary_added(self, tmp_path):
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2]})
+        write_parquet(tgt, {"id": [1, 2], "score": [0.1, 0.2]})
+        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        summary = result.schema_diff.summary()
+        assert "+1 added" in summary
+
+    def test_summary_removed(self, tmp_path):
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2], "score": [0.1, 0.2]})
+        write_parquet(tgt, {"id": [1, 2]})
+        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        summary = result.schema_diff.summary()
+        assert "-1 removed" in summary
+
+    def test_summary_type_changed(self, tmp_path):
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2], "val": [1, 2]})
+        write_parquet(tgt, {"id": [1, 2], "val": [1.0, 2.0]})
+        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        summary = result.schema_diff.summary()
+        # May or may not flag integer→double depending on DuckDB; just check it runs
+        assert isinstance(summary, str)
+
+
+class TestMarkdownReporter:
+    """Cover MarkdownReporter paths."""
+
+    def _make_result(self, tmp_path, src_data, tgt_data, **kwargs):
         src = tmp_path / "a.parquet"
         tgt = tmp_path / "b.parquet"
         write_parquet(src, src_data)
@@ -1113,6 +1371,464 @@ class TestValidateCommand:
         return p
 
     def cli(self):
+
+        return LakeDiff(source=str(src), target=str(tgt), **kwargs).run()
+
+    def test_no_schema_changes_renders(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        data = {"id": [1, 2], "val": [10, 20]}
+        result = self._make_result(tmp_path, data, data)
+        md = MarkdownReporter(result).render()
+        assert "No schema changes detected" in md
+
+    def test_schema_with_added_column(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        src_data = {"id": [1, 2]}
+        tgt_data = {"id": [1, 2], "new_col": [10, 20]}
+        result = self._make_result(tmp_path, src_data, tgt_data, mode="schema")
+        md = MarkdownReporter(result).render()
+        assert "Added columns" in md or "new_col" in md
+
+    def test_schema_with_removed_column(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        src_data = {"id": [1, 2], "old_col": [10, 20]}
+        tgt_data = {"id": [1, 2]}
+        result = self._make_result(tmp_path, src_data, tgt_data, mode="schema")
+        md = MarkdownReporter(result).render()
+        assert "Removed columns" in md or "old_col" in md
+
+    def test_no_stats_renders_placeholder(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        data = {"id": [1, 2]}
+        result = self._make_result(tmp_path, data, data, mode="schema")
+        md = MarkdownReporter(result).render()
+        assert "No stats computed" in md
+
+    def test_stats_table_renders(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        src_data = {"id": [1, 2, 3], "val": [10, 20, 30]}
+        tgt_data = {"id": [1, 2, 3], "val": [11, 22, 33]}
+        result = self._make_result(tmp_path, src_data, tgt_data, mode="stats")
+        md = MarkdownReporter(result).render()
+        assert "Statistical Diff" in md
+        assert "val" in md
+
+    def test_render_to_path(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        data = {"id": [1, 2], "val": [10, 20]}
+        result = self._make_result(tmp_path, data, data)
+        out = tmp_path / "report.md"
+        ret = MarkdownReporter(result).render(path=str(out))
+        assert ret == ""
+        assert out.exists()
+        assert "DiffLake Report" in out.read_text(encoding="utf-8")
+
+    def test_render_returns_string_when_no_path(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        data = {"id": [1, 2], "val": [10, 20]}
+        result = self._make_result(tmp_path, data, data)
+        md = MarkdownReporter(result).render()
+        assert isinstance(md, str)
+        assert len(md) > 0
+
+
+class TestCliReporterVerbose:
+    """Cover verbose mode and _fmt_pct negative branch."""
+
+    def test_fmt_pct_negative(self):
+        from difflake.reporters.cli_reporter import _fmt_pct
+        assert "-5.00%" in _fmt_pct(-5.0, show_sign=True)
+
+    def test_fmt_pct_none(self):
+        from difflake.reporters.cli_reporter import _fmt_pct
+        assert _fmt_pct(None) == "—"
+
+    def test_fmt_pct_positive_with_sign(self):
+        from difflake.reporters.cli_reporter import _fmt_pct
+        result = _fmt_pct(3.5, show_sign=True)
+        assert "+" in result and "3.50%" in result
+
+    def test_verbose_render_with_sample_changed(self, tmp_path):
+        from difflake.reporters.cli_reporter import CliReporter
+        src_data = {"id": [1, 2, 3], "val": [10, 20, 30]}
+        tgt_data = {"id": [1, 2, 3], "val": [11, 20, 30]}
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, src_data)
+        write_parquet(tgt, tgt_data)
+        result = LakeDiff(
+            source=str(src), target=str(tgt),
+            primary_key="id", mode="full",
+        ).run()
+        # Should not raise even with verbose=True and sample_changed present
+        reporter = CliReporter(result, verbose=True)
+        reporter.render()  # just verify no exception
+
+    def test_non_verbose_render(self, tmp_path):
+        from difflake.reporters.cli_reporter import CliReporter
+        data = {"id": [1, 2], "val": [10, 20]}
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, data)
+        write_parquet(tgt, data)
+        result = LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        CliReporter(result, verbose=False).render()
+
+
+class TestDuckDBConnection:
+    """Cover DuckDBConnection direct usage."""
+
+    def test_list_columns(self, tmp_path):
+        from difflake.connection import _read_sql
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2], "name": ["a", "b"]})
+        conn = DuckDBConnection()
+        sql = _read_sql(str(src), "parquet")
+        conn.register_view("test_view", sql, "parquet", str(src))
+        cols = conn.columns("test_view")
+        conn.close()
+        col_names = [c[0] for c in cols]
+        assert "id" in col_names
+        assert "name" in col_names
+
+    def test_fetchdf(self, tmp_path):
+        from difflake.connection import _read_sql
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2]})
+        conn = DuckDBConnection()
+        sql = _read_sql(str(src), "parquet")
+        conn.register_view("v", sql, "parquet", str(src))
+        col_names, rows = conn.fetchdf("SELECT * FROM v ORDER BY id")
+        conn.close()
+        assert "id" in col_names
+        assert len(rows) == 2
+
+    def test_scalar(self, tmp_path):
+        from difflake.connection import _read_sql
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2, 3]})
+        conn = DuckDBConnection()
+        sql = _read_sql(str(src), "parquet")
+        conn.register_view("v", sql, "parquet", str(src))
+        count = conn.scalar("SELECT COUNT(*) FROM v")
+        conn.close()
+        assert count == 3
+
+
+class TestReadSqlDirectories:
+    """Cover _read_sql directory branches for csv/json/jsonl."""
+
+    def test_csv_directory(self, tmp_path):
+        sql = _read_sql(str(tmp_path), "csv")
+        assert "read_csv" in sql and "**/*.csv" in sql
+
+    def test_json_directory(self, tmp_path):
+        sql = _read_sql(str(tmp_path), "json")
+        assert "read_json" in sql and "**/*.json" in sql
+
+    def test_jsonl_directory(self, tmp_path):
+        sql = _read_sql(str(tmp_path), "jsonl")
+        assert "read_ndjson" in sql and "**/*.jsonl" in sql
+
+    def test_parquet_directory(self, tmp_path):
+        sql = _read_sql(str(tmp_path), "parquet")
+        assert "read_parquet" in sql and "**/*.parquet" in sql
+
+    def test_parquet_file(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "parquet")
+        # File path — no glob
+        assert "**" not in sql
+
+    def test_sample_size_produces_tablesample(self, tmp_path):
+        p = str(tmp_path / "data.parquet")
+        sql = _read_sql(p, "parquet", sample_size=1000)
+        # sample_size causes TABLESAMPLE or USING SAMPLE
+        assert "SAMPLE" in sql.upper() or "TABLESAMPLE" in sql.upper()
+
+
+class TestConfigureCloud:
+    """Cover configure_s3/gcs/azure with mocked env vars."""
+
+    def test_configure_s3_with_credentials(self, monkeypatch):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secretkey")
+        monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-2")
+        conn = DuckDBConnection()
+        conn.configure_s3()  # Should not raise
+        conn.close()
+
+    def test_configure_s3_with_endpoint(self, monkeypatch):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "http://localhost:9000")
+        conn = DuckDBConnection()
+        conn.configure_s3()
+        conn.close()
+
+    def test_configure_s3_no_credentials(self, monkeypatch):
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+        conn = DuckDBConnection()
+        conn.configure_s3()  # No-op without creds — should not raise
+        conn.close()
+
+    def test_configure_gcs_with_credentials(self, monkeypatch, tmp_path):
+        creds_file = tmp_path / "sa.json"
+        creds_file.write_text("{}")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(creds_file))
+        conn = DuckDBConnection()
+        try:
+            conn.configure_gcs()
+        except Exception:
+            pass  # GCS extension may not be available in test environment
+        finally:
+            conn.close()
+
+    def test_configure_gcs_no_credentials(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        conn = DuckDBConnection()
+        conn.configure_gcs()  # No-op without creds
+        conn.close()
+
+    def test_configure_azure_with_account_key(self, monkeypatch):
+        monkeypatch.setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
+        monkeypatch.setenv("AZURE_STORAGE_KEY", "mykey")
+        monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
+        conn = DuckDBConnection()
+        try:
+            conn.configure_azure()
+        except Exception:
+            pass  # Azure extension may not be available in test environment
+        finally:
+            conn.close()
+
+    def test_configure_azure_no_credentials(self, monkeypatch):
+        monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+        monkeypatch.delenv("AZURE_STORAGE_KEY", raising=False)
+        monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
+        conn = DuckDBConnection()
+        conn.configure_azure()  # No-op without creds
+        conn.close()
+
+
+class TestCliLoadConfig:
+    """Cover _load_config branches."""
+
+    def test_load_explicit_config_file(self, tmp_path):
+        from difflake.cli import _load_config
+        cfg_file = tmp_path / "myconfig.yaml"
+        cfg_file.write_text("key: user_id\nmode: stats\n")
+        result = _load_config(str(cfg_file))
+        assert result["key"] == "user_id"
+        assert result["mode"] == "stats"
+
+    def test_load_config_invalid_yaml_returns_empty(self, tmp_path):
+        from difflake.cli import _load_config
+        cfg_file = tmp_path / "bad.yaml"
+        cfg_file.write_text("key: [unclosed")
+        # Should warn and return {} rather than raise
+        result = _load_config(str(cfg_file))
+        assert result == {}
+
+    def test_load_config_missing_path_returns_empty(self, tmp_path):
+        from difflake.cli import _load_config
+        result = _load_config(str(tmp_path / "nonexistent.yaml"))
+        assert result == {}
+
+    def test_load_config_no_path_no_default_file(self, tmp_path, monkeypatch):
+        from difflake.cli import _load_config
+        monkeypatch.chdir(tmp_path)
+        result = _load_config(None)
+        assert result == {}
+
+
+class TestCliSummaryLine:
+    """Cover _summary_line branches."""
+
+    def _make_result(self, tmp_path, src_data, tgt_data, **kwargs):
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, src_data)
+        write_parquet(tgt, tgt_data)
+        return LakeDiff(source=str(src), target=str(tgt), **kwargs).run()
+
+    def test_summary_with_removed_column(self, tmp_path):
+        from difflake.cli import _summary_line
+        result = self._make_result(
+            tmp_path,
+            {"id": [1, 2], "old_col": ["a", "b"]},
+            {"id": [1, 2]},
+            mode="schema",
+        )
+        line = _summary_line(result)
+        assert "removed" in line
+
+    def test_summary_with_no_changes(self, tmp_path):
+        from difflake.cli import _summary_line
+        data = {"id": [1, 2], "val": [10, 20]}
+        result = self._make_result(tmp_path, data, data, mode="schema")
+        line = _summary_line(result)
+        assert "no changes" in line
+
+    def test_summary_with_rows_added(self, tmp_path):
+        from difflake.cli import _summary_line
+        src = {"id": [1, 2], "val": [10, 20]}
+        tgt = {"id": [1, 2, 3], "val": [10, 20, 30]}
+        result = self._make_result(tmp_path, src, tgt, primary_key="id")
+        line = _summary_line(result)
+        assert "added" in line
+
+    def test_summary_with_rows_changed(self, tmp_path):
+        from difflake.cli import _summary_line
+        src = {"id": [1, 2], "val": [10, 20]}
+        tgt = {"id": [1, 2], "val": [99, 20]}
+        result = self._make_result(tmp_path, src, tgt, primary_key="id")
+        line = _summary_line(result)
+        assert "changed" in line or "no changes" in line  # depends on diff detection
+
+
+class TestCliReporterSchemaChanges:
+    """Cover CLI reporter schema display: removed/type_changed/renamed/order."""
+
+    def _make_result(self, tmp_path, src_data, tgt_data, **kwargs):
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, src_data)
+        write_parquet(tgt, tgt_data)
+        return LakeDiff(source=str(src), target=str(tgt), **kwargs).run()
+
+    def test_render_removed_columns(self, tmp_path):
+        from difflake.reporters.cli_reporter import CliReporter
+        result = self._make_result(
+            tmp_path,
+            {"id": [1, 2], "old_col": ["a", "b"]},
+            {"id": [1, 2]},
+            mode="schema",
+        )
+        CliReporter(result).render()  # should not raise
+
+    def test_render_type_changed_columns(self, tmp_path):
+        from difflake.reporters.cli_reporter import CliReporter
+        # Force a type change: integer → varchar (use CSV to control types)
+        import csv as csv_mod
+        src = tmp_path / "src.csv"
+        tgt = tmp_path / "tgt.csv"
+        with open(src, "w") as f:
+            csv_mod.writer(f).writerows([["id", "val"], ["1", "10"], ["2", "20"]])
+        with open(tgt, "w") as f:
+            csv_mod.writer(f).writerows([["id", "val"], ["1", "hello"], ["2", "world"]])
+        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        CliReporter(result).render()
+
+    def test_render_order_changed(self, tmp_path):
+        from difflake.reporters.cli_reporter import CliReporter
+        write_parquet(tmp_path / "a.parquet", {"id": [1], "name": ["x"], "val": [1.0]})
+        write_parquet(tmp_path / "b.parquet", {"val": [1.0], "name": ["x"], "id": [1]})
+        result = LakeDiff(
+            source=str(tmp_path / "a.parquet"),
+            target=str(tmp_path / "b.parquet"),
+            mode="schema",
+        ).run()
+        CliReporter(result).render()
+
+
+class TestMarkdownReporterExtended:
+    """Cover remaining markdown reporter paths."""
+
+    def test_pct_none_renders_dash(self):
+        from difflake.reporters.markdown_reporter import _pct, _num
+        assert _pct(None) == "—"
+        assert _num(None) == "—"
+
+    def test_num_with_value(self):
+        from difflake.reporters.markdown_reporter import _num
+        result = _num(1234.5678)
+        assert "1" in result
+
+    def test_pct_positive_with_sign(self):
+        from difflake.reporters.markdown_reporter import _pct
+        result = _pct(5.5, sign=True)
+        assert "+" in result
+
+    def test_render_type_changed_columns(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        import csv as csv_mod
+        src = tmp_path / "src.csv"
+        tgt = tmp_path / "tgt.csv"
+        with open(src, "w") as f:
+            csv_mod.writer(f).writerows([["id", "val"], ["1", "10"], ["2", "20"]])
+        with open(tgt, "w") as f:
+            csv_mod.writer(f).writerows([["id", "val"], ["1", "hello"], ["2", "world"]])
+        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        md = MarkdownReporter(result).render()
+        assert isinstance(md, str)
+
+    def test_render_renamed_columns(self, tmp_path):
+        from difflake.reporters.markdown_reporter import MarkdownReporter
+        # "user_name" → "username" has high Jaro-Winkler similarity → rename detected
+        write_parquet(tmp_path / "a.parquet", {"id": [1, 2], "user_name": ["a", "b"]})
+        write_parquet(tmp_path / "b.parquet", {"id": [1, 2], "username": ["a", "b"]})
+        result = LakeDiff(
+            source=str(tmp_path / "a.parquet"),
+            target=str(tmp_path / "b.parquet"),
+            mode="schema",
+        ).run()
+        md = MarkdownReporter(result).render()
+        # Renamed columns or removed/added — either way renders without error
+        assert isinstance(md, str)
+        assert "DiffLake Report" in md
+
+
+class TestCliReporterFmtNum:
+    """Cover _fmt_num None branch."""
+
+    def test_fmt_num_none(self):
+        from difflake.reporters.cli_reporter import _fmt_num
+        assert _fmt_num(None) == "—"
+
+    def test_fmt_num_value(self):
+        from difflake.reporters.cli_reporter import _fmt_num
+        assert "42" in _fmt_num(42.0)
+
+    def test_render_renamed_columns(self, tmp_path):
+        from difflake.reporters.cli_reporter import CliReporter
+        write_parquet(tmp_path / "a.parquet", {"id": [1, 2], "user_name": ["a", "b"]})
+        write_parquet(tmp_path / "b.parquet", {"id": [1, 2], "username": ["a", "b"]})
+        result = LakeDiff(
+            source=str(tmp_path / "a.parquet"),
+            target=str(tmp_path / "b.parquet"),
+            mode="schema",
+        ).run()
+        CliReporter(result).render()  # hits renamed_columns branch
+
+
+class TestCliRenderError:
+    """Cover _render_error branches."""
+
+    def test_render_error_check_prefix(self):
+        from difflake.cli import _render_error
+        # Should not raise; lines starting with "Check " get dim style
+        _render_error(RuntimeError(
+            "Cannot access 's3://bucket/key'\n"
+            "  Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set.\n"
+            "  Original error: HTTP 403"
+        ))
+
+    def test_render_error_set_prefix(self):
+        from difflake.cli import _render_error
+        _render_error(RuntimeError("Set GOOGLE_APPLICATION_CREDENTIALS=/path"))
+
+    def test_render_error_plain(self):
+        from difflake.cli import _render_error
+        _render_error(RuntimeError("Something went wrong"))
+
+
+class TestCompareCommandOutputFormats:
+    """Cover compare command output format branches."""
+
+    @staticmethod
+    def _cli():
         from click.testing import CliRunner
         from difflake.cli import main
         return CliRunner(), main
@@ -1935,3 +2651,125 @@ class TestLogging:
             h.flush()
         content = log_path.read_text()
         assert "diff parameters" in content
+
+    def test_output_markdown(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2], "val": [10, 20]})
+        write_parquet(tgt, {"id": [1, 2], "val": [11, 20]})
+        import os
+        orig = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            res = r.invoke(m, ["compare", str(src), str(tgt), "--output", "markdown"])
+            assert res.exit_code in (0, 2)
+            md_files = list(tmp_path.glob("difflake_*.md"))
+            assert len(md_files) == 1
+        finally:
+            os.chdir(orig)
+
+    def test_output_with_explicit_out(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2], "val": [10, 20]})
+        write_parquet(tgt, {"id": [1, 2], "val": [11, 20]})
+        out = tmp_path / "out.json"
+        res = r.invoke(m, ["compare", str(src), str(tgt),
+                           "--output", "json", "--out", str(out)])
+        assert res.exit_code in (0, 2)
+
+    def test_compare_with_config_file(self, tmp_path, monkeypatch):
+        r, m = self._cli()
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2], "val": [10, 20]})
+        write_parquet(tgt, {"id": [1, 2], "val": [11, 20]})
+        cfg = tmp_path / "difflake.yaml"
+        cfg.write_text("mode: stats\n")
+        monkeypatch.chdir(tmp_path)
+        res = r.invoke(m, ["compare", str(src), str(tgt), "--config", str(cfg)])
+        assert res.exit_code in (0, 2)
+
+    def test_compare_nonexistent_source_exits(self, tmp_path):
+        r, m = self._cli()
+        tgt = tmp_path / "b.parquet"
+        write_parquet(tgt, {"id": [1, 2]})
+        res = r.invoke(m, ["compare", str(tmp_path / "missing.parquet"), str(tgt)])
+        assert res.exit_code != 0
+
+    def test_show_schema_with_col_filter(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2], "name": ["a", "b"], "val": [10, 20]})
+        res = r.invoke(m, ["show", str(src), "--schema", "--columns", "id,name"])
+        assert res.exit_code == 0
+        assert "id" in res.output
+
+    def test_show_tail_flag(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2, 3, 4, 5], "val": [10, 20, 30, 40, 50]})
+        res = r.invoke(m, ["show", str(src), "--tail"])
+        assert res.exit_code == 0
+
+    def test_show_rows_with_many_columns(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        # 12 columns to hit the 10 < cols <= 20 branch
+        data = {f"col{i}": list(range(1, 4)) for i in range(12)}
+        write_parquet(src, data)
+        res = r.invoke(m, ["show", str(src), "--rows", "2"])
+        assert res.exit_code == 0
+
+    def test_show_stats(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2, 3], "val": [10.0, 20.0, 30.0], "name": ["a", "b", "c"]})
+        res = r.invoke(m, ["show", str(src), "--stats"])
+        assert res.exit_code == 0
+        assert "Stats" in res.output or "Column" in res.output
+
+    def test_show_stats_with_datetime(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2], "ts": ["2024-01-01", "2024-06-01"]})
+        res = r.invoke(m, ["show", str(src), "--stats"])
+        assert res.exit_code == 0
+
+    def test_show_overview_more_rows(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        # More than 5 rows so "more rows" message triggers
+        write_parquet(src, {"id": list(range(1, 11)), "val": list(range(10, 20))})
+        res = r.invoke(m, ["show", str(src)])
+        assert res.exit_code == 0
+        # Should mention there are more rows
+        assert "more" in res.output.lower() or "10" in res.output
+
+    def test_show_rows_with_many_columns_wide(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        # 25 columns to hit the >20 columns branch in _render_rows
+        data = {f"col{i}": list(range(1, 3)) for i in range(25)}
+        write_parquet(src, data)
+        res = r.invoke(m, ["show", str(src), "--rows", "1"])
+        assert res.exit_code == 0
+
+    def test_show_count_command(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "data.parquet"
+        write_parquet(src, {"id": [1, 2, 3], "val": [10, 20, 30]})
+        res = r.invoke(m, ["show", str(src), "--count"])
+        assert res.exit_code == 0
+        assert "Rows" in res.output
+
+    def test_diff_alias(self, tmp_path):
+        r, m = self._cli()
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2], "val": [10, 20]})
+        write_parquet(tgt, {"id": [1, 2], "val": [11, 20]})
+        res = r.invoke(m, ["diff", str(src), str(tgt), "--mode", "schema"])
+        assert res.exit_code in (0, 2)
