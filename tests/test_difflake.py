@@ -1341,3 +1341,187 @@ class TestValidateCommand:
         res = r.invoke(m, ["validate", str(data_p), "--min-rows", "1"])
         assert res.exit_code == 0
         assert "1 check passed" in res.output
+
+
+# ── Query command ───────────────────────────────────────────────────────────
+
+class TestQueryCommand:
+    """Tests for `difflake query` CLI command."""
+
+    @pytest.fixture
+    def data_p(self, tmp_path):
+        p = tmp_path / "data.parquet"
+        write_parquet(p, {
+            "id":     [1, 2, 3, 4, 5],
+            "name":   ["Alice", "Bob", "Carol", "Dave", "Eve"],
+            "age":    [30, 25, 35, 28, 22],
+            "score":  [95.5, 88.0, 72.3, 91.1, 60.0],
+        })
+        return p
+
+    def cli(self):
+        from click.testing import CliRunner
+        from difflake.cli import main
+        return CliRunner(), main
+
+    # ── basic SELECT ──────────────────────────────────────────────────────
+
+    def test_select_all_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT * FROM t"])
+        assert res.exit_code == 0
+        assert "Alice" in res.output
+
+    def test_select_with_where(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT name FROM t WHERE age > 28"])
+        assert res.exit_code == 0
+        assert "Alice" in res.output
+        assert "Bob" not in res.output
+
+    def test_select_count(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT COUNT(*) AS n FROM t"])
+        assert res.exit_code == 0
+        assert "5" in res.output
+
+    def test_select_aggregation(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p),
+                           "SELECT MIN(age) AS mn, MAX(age) AS mx FROM t"])
+        assert res.exit_code == 0
+        assert "22" in res.output
+        assert "35" in res.output
+
+    def test_result_row_count_shown(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT * FROM t"])
+        assert res.exit_code == 0
+        assert "5 rows" in res.output
+
+    def test_single_row_singular_label(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p),
+                           "SELECT name FROM t WHERE id = 1"])
+        assert res.exit_code == 0
+        assert "1 row" in res.output
+
+    # ── --limit ───────────────────────────────────────────────────────────
+
+    def test_limit_restricts_output(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT * FROM t", "--limit", "2"])
+        assert res.exit_code == 0
+        # Only 2 rows in table
+        assert "2 rows" in res.output
+
+    def test_limit_note_shown_when_hit(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT * FROM t", "--limit", "5"])
+        assert res.exit_code == 0
+        # 5 rows, limit = 5 → note shown
+        assert "limited to 5" in res.output
+
+    # ── --output json ─────────────────────────────────────────────────────
+
+    def test_output_json_stdout(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT id, name FROM t",
+                           "--output", "json"])
+        assert res.exit_code == 0
+        import json
+        records = json.loads(res.output)
+        assert len(records) == 5
+        assert records[0]["name"] == "Alice"
+
+    def test_output_json_to_file(self, data_p, tmp_path):
+        out = tmp_path / "out.json"
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT * FROM t",
+                           "--output", "json", "--out", str(out)])
+        assert res.exit_code == 0
+        assert out.exists()
+        import json
+        data = json.loads(out.read_text())
+        assert len(data) == 5
+
+    # ── --output csv ──────────────────────────────────────────────────────
+
+    def test_output_csv_stdout(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT id, name FROM t",
+                           "--output", "csv"])
+        assert res.exit_code == 0
+        lines = [l for l in res.output.strip().splitlines() if l]
+        assert lines[0] == "id,name"
+        assert "Alice" in res.output
+
+    def test_output_csv_to_file(self, data_p, tmp_path):
+        out = tmp_path / "out.csv"
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT id, name FROM t",
+                           "--output", "csv", "--out", str(out)])
+        assert res.exit_code == 0
+        assert out.exists()
+        content = out.read_text()
+        assert "id,name" in content
+
+    def test_output_csv_no_header(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT id FROM t",
+                           "--output", "csv", "--no-header"])
+        assert res.exit_code == 0
+        # First line should be a number, not "id"
+        first_line = res.output.strip().splitlines()[0]
+        assert first_line.isdigit()
+
+    # ── --no-header (cli mode) ────────────────────────────────────────────
+
+    def test_no_header_cli_mode(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "SELECT name FROM t WHERE id=1",
+                           "--no-header"])
+        assert res.exit_code == 0
+        # "name" header should not appear as a column header
+        # "Alice" should still appear as data
+        assert "Alice" in res.output
+
+    # ── CSV input ─────────────────────────────────────────────────────────
+
+    def test_query_csv_file(self, tmp_path):
+        p = tmp_path / "data.csv"
+        p.write_text("id,val\n1,10\n2,20\n3,30\n")
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(p), "SELECT SUM(val) AS total FROM t"])
+        assert res.exit_code == 0
+        assert "60" in res.output
+
+    # ── JSON input ────────────────────────────────────────────────────────
+
+    def test_query_json_file(self, tmp_path):
+        import json
+        p = tmp_path / "data.json"
+        p.write_text(json.dumps([{"x": 1}, {"x": 2}, {"x": 3}]))
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(p), "SELECT MAX(x) AS mx FROM t"])
+        assert res.exit_code == 0
+        assert "3" in res.output
+
+    # ── error handling ────────────────────────────────────────────────────
+
+    def test_missing_file_exits_1(self, tmp_path):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(tmp_path / "missing.parquet"),
+                           "SELECT * FROM t"])
+        assert res.exit_code == 1
+
+    def test_bad_sql_exits_1(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p), "THIS IS NOT SQL"])
+        assert res.exit_code == 1
+
+    def test_nonexistent_column_exits_1(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["query", str(data_p),
+                           "SELECT nonexistent_col FROM t"])
+        assert res.exit_code == 1
