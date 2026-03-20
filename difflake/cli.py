@@ -663,6 +663,220 @@ def _show_freq(con, col, total_rows, path, where_tag):
     console.print(f"  [dim]Top 10 of {total_rows:,} rows[/dim]\n")
 
 
+def _run_validate(path, fmt, where, checks):
+    """
+    Execute validation checks against a dataset.
+    Returns list of (check_name, passed, detail) tuples.
+    """
+    from difflake.connection import DuckDBConnection, _detect_format, _read_sql
+
+    con = DuckDBConnection()
+    detected_fmt = fmt or _detect_format(path)
+    sql = _read_sql(path, detected_fmt, where=where)
+    con.register_view("__val", sql, detected_fmt, path)
+
+    results = []
+    for check in checks:
+        kind = check["kind"]
+        try:
+            if kind == "min_rows":
+                n = int(con.scalar("SELECT COUNT(*) FROM __val") or 0)
+                passed = n >= check["value"]
+                results.append((f"row count >= {check['value']:,}", passed,
+                                f"{n:,} rows"))
+            elif kind == "max_rows":
+                n = int(con.scalar("SELECT COUNT(*) FROM __val") or 0)
+                passed = n <= check["value"]
+                results.append((f"row count <= {check['value']:,}", passed,
+                                f"{n:,} rows"))
+            elif kind == "not_null":
+                col = check["column"]
+                n = int(con.scalar(
+                    f'SELECT COUNT(*) FROM __val WHERE "{col}" IS NULL') or 0)
+                passed = n == 0
+                results.append((f'"{col}" not null', passed,
+                                f"{n:,} nulls found" if n else "no nulls"))
+            elif kind == "unique":
+                col = check["column"]
+                total = int(con.scalar(
+                    f'SELECT COUNT(*) FROM __val WHERE "{col}" IS NOT NULL') or 0)
+                distinct = int(con.scalar(
+                    f'SELECT COUNT(DISTINCT "{col}") FROM __val') or 0)
+                passed = total == distinct
+                dups = total - distinct
+                results.append((f'"{col}" unique', passed,
+                                f"{dups:,} duplicates" if dups else "all unique"))
+            elif kind == "min_val":
+                col = check["column"]
+                val = check["value"]
+                row = con.fetchone(
+                    f'SELECT MIN(CAST("{col}" AS DOUBLE)) FROM __val '
+                    f'WHERE "{col}" IS NOT NULL')
+                actual = float(row[0]) if row and row[0] is not None else None
+                passed = actual is not None and actual >= val
+                results.append((f'"{col}" min >= {val}', passed,
+                                f"actual min = {actual}" if actual is not None else "no data"))
+            elif kind == "max_val":
+                col = check["column"]
+                val = check["value"]
+                row = con.fetchone(
+                    f'SELECT MAX(CAST("{col}" AS DOUBLE)) FROM __val '
+                    f'WHERE "{col}" IS NOT NULL')
+                actual = float(row[0]) if row and row[0] is not None else None
+                passed = actual is not None and actual <= val
+                results.append((f'"{col}" max <= {val}', passed,
+                                f"actual max = {actual}" if actual is not None else "no data"))
+            elif kind == "column_exists":
+                col = check["column"]
+                schema = dict(con.columns("__val"))
+                passed = col in schema
+                results.append((f'column "{col}" exists', passed,
+                                "found" if passed else "missing"))
+            elif kind == "where_count":
+                expr = check["expr"]
+                expected = check["value"]
+                n = int(con.scalar(
+                    f'SELECT COUNT(*) FROM __val WHERE {expr}') or 0)
+                passed = n == expected
+                results.append((f"WHERE {expr} count == {expected:,}", passed,
+                                f"{n:,} rows match"))
+        except Exception as exc:
+            results.append((f"{kind} check", False, f"error: {exc}"))
+
+    con.close()
+    return results
+
+
+def _parse_val_checks(min_rows, max_rows, not_null, unique,
+                      min_val, max_val, column_exists, where_count,
+                      config_checks):
+    """Merge CLI flags + YAML config into a unified check list."""
+    checks = list(config_checks)  # YAML checks first
+    if min_rows is not None:
+        checks.append({"kind": "min_rows",  "value": min_rows})
+    if max_rows is not None:
+        checks.append({"kind": "max_rows",  "value": max_rows})
+    for col in not_null:
+        checks.append({"kind": "not_null",  "column": col})
+    for col in unique:
+        checks.append({"kind": "unique",    "column": col})
+    for spec in min_val:
+        col, _, val = spec.rpartition(":")
+        if col:
+            checks.append({"kind": "min_val", "column": col, "value": float(val)})
+    for spec in max_val:
+        col, _, val = spec.rpartition(":")
+        if col:
+            checks.append({"kind": "max_val", "column": col, "value": float(val)})
+    for col in column_exists:
+        checks.append({"kind": "column_exists", "column": col})
+    for spec in where_count:
+        # format: "expr==N"  e.g.  "status='active'==100"
+        if "==" in spec:
+            expr, _, cnt = spec.rpartition("==")
+            checks.append({"kind": "where_count", "expr": expr, "value": int(cnt)})
+    return checks
+
+
+@main.command("validate")
+@click.argument("path", type=click.Path())
+@click.option("--min-rows", default=None, type=int,
+    help="Assert dataset has at least N rows.")
+@click.option("--max-rows", default=None, type=int,
+    help="Assert dataset has at most N rows.")
+@click.option("--not-null", multiple=True, metavar="COLUMN",
+    help="Assert column has no nulls. Repeatable.")
+@click.option("--unique", multiple=True, metavar="COLUMN",
+    help="Assert column has no duplicates. Repeatable.")
+@click.option("--min-val", multiple=True, metavar="COL:VALUE",
+    help="Assert numeric column min >= VALUE. e.g. --min-val fare_amount:0")
+@click.option("--max-val", multiple=True, metavar="COL:VALUE",
+    help="Assert numeric column max <= VALUE. e.g. --max-val age:120")
+@click.option("--column-exists", multiple=True, metavar="COLUMN",
+    help="Assert column is present in schema. Repeatable.")
+@click.option("--where-count", multiple=True, metavar="EXPR==N",
+    help="Assert COUNT(*) WHERE expr equals N. e.g. --where-count \"status='X'==0\"")
+@click.option("--where", "-w", default=None,
+    help="Pre-filter dataset before running checks.")
+@click.option("--format", "fmt", default=None,
+    type=click.Choice(_ALL_FORMATS, case_sensitive=False),
+    help="Explicit format override.")
+@click.option("--config", "-c", default=None, type=click.Path(),
+    help="Path to difflake.yaml. Loads validate: section.")
+@click.option("--fail-fast", is_flag=True,
+    help="Stop after first failure.")
+def validate(path, min_rows, max_rows, not_null, unique,
+             min_val, max_val, column_exists, where_count,
+             where, fmt, config, fail_fast):
+    """
+    Validate a dataset against assertions. Exits 1 if any check fails.
+
+    \b
+    Examples:
+      difflake validate data.parquet --min-rows 1000
+      difflake validate data.parquet --not-null user_id --not-null email
+      difflake validate data.parquet --unique order_id
+      difflake validate data.parquet --min-val fare_amount:0 --max-val age:120
+      difflake validate data.parquet --column-exists id --column-exists name
+      difflake validate data.parquet --config difflake.yaml
+      difflake validate s3://bucket/data.parquet --min-rows 500
+    """
+    cfg = _load_config(config)
+    config_checks = cfg.get("validate", {}).get("checks", [])
+
+    checks = _parse_val_checks(min_rows, max_rows, not_null, unique,
+                               min_val, max_val, column_exists, where_count,
+                               config_checks)
+
+    if not checks:
+        console.print("[yellow]No checks specified. Use --min-rows, --not-null, etc.[/yellow]")
+        return
+
+    console.print()
+    console.print(Panel(
+        Text(f"🔍 Validating — {Path(path).name}", style="bold cyan"),
+        border_style="cyan",
+    ))
+    if where:
+        console.print(f"  [dim]Filter: WHERE {where}[/dim]")
+    console.print(f"  [dim]Running {len(checks)} check{'s' if len(checks) != 1 else ''}…[/dim]\n")
+
+    try:
+        results = _run_validate(path, fmt, where, checks)
+    except FileNotFoundError as e:
+        err_console.print(f"[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+    except Exception as e:
+        err_console.print(f"[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+
+    tbl = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold")
+    tbl.add_column("Status", width=6)
+    tbl.add_column("Check",  style="bold", min_width=30)
+    tbl.add_column("Detail", style="dim",  min_width=20)
+
+    failed = 0
+    for name, passed, detail in results:
+        icon   = "[green]✅[/green]" if passed else "[red]❌[/red]"
+        detail_style = "dim" if passed else "red"
+        tbl.add_row(icon, name, f"[{detail_style}]{detail}[/{detail_style}]")
+        if not passed:
+            failed += 1
+            if fail_fast:
+                break
+
+    console.print(tbl)
+
+    total = len(results)
+    if failed == 0:
+        console.print(f"  [green]✅ All {total} check{'s' if total != 1 else ''} passed[/green]\n")
+    else:
+        console.print(
+            f"  [red]❌ {failed} of {total} check{'s' if total != 1 else ''} failed[/red]\n"
+        )
+        sys.exit(1)
+
+
 @main.command("formats")
 def formats():
     """List all supported input formats, extensions, and cloud URIs."""
