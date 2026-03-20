@@ -174,9 +174,9 @@ class DiffResult:
             return None
         return output
 
-    def to_html(self, path: str) -> None:
+    def to_html(self, path: str, offline: bool = True) -> None:
         from difflake.reporters.html_reporter import HtmlReporter
-        HtmlReporter(self).write(path)
+        HtmlReporter(self, offline=offline).write(path)
 
     def to_markdown(self, path: str | None = None) -> str | None:
         from difflake.reporters.markdown_reporter import MarkdownReporter

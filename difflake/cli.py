@@ -133,7 +133,7 @@ def main():
 
 def _compare_command(source, target, key, mode, output, out, threshold,
                      source_format, target_format, where, sample, limit,
-                     ignore_columns, verbose, config):
+                     ignore_columns, verbose, config, offline=True):
     cfg = _load_config(config)
     if key is None and "key" in cfg:
         key = cfg["key"]
@@ -221,7 +221,7 @@ def _compare_command(source, target, key, mode, output, out, threshold,
         if result.drift_alerts:
             sys.exit(2)
     elif output == "html":
-        result.to_html(out)
+        result.to_html(out, offline=offline)
         console.print(f"[green]✅ HTML report -> {out}[/green]")
         if result.drift_alerts:
             sys.exit(2)
@@ -263,6 +263,8 @@ _COMPARE_OPTIONS = [
         help="Show sample added/changed/removed rows."),
     click.option("--config", "-c", default=None, type=click.Path(),
         help="Path to difflake.yaml config file."),
+    click.option("--offline/--no-offline", default=True, show_default=True,
+        help="Embed Chart.js inline in HTML report (offline-safe). Use --no-offline for CDN link."),
 ]
 
 
@@ -278,7 +280,7 @@ def _add_options(options):
 @_add_options(_COMPARE_OPTIONS)
 def compare(source, target, key, mode, output, out, threshold,
             source_format, target_format, where, sample, limit,
-            ignore_columns, verbose, config):
+            ignore_columns, verbose, config, offline):
     """
     Compare two datasets — schema, stats, and row-level diff.
 
@@ -291,18 +293,19 @@ def compare(source, target, key, mode, output, out, threshold,
       difflake compare old.parquet new.parquet --sample 500000 --key trip_id
       difflake compare old.parquet new.parquet --limit 1000000 --key id
       difflake compare old.parquet new.parquet --output html
+      difflake compare old.parquet new.parquet --output html --no-offline
       difflake compare s3://bucket/v1/ s3://bucket/v2/ --mode stats
     """
     _compare_command(source, target, key, mode, output, out, threshold,
                      source_format, target_format, where, sample, limit,
-                     ignore_columns, verbose, config)
+                     ignore_columns, verbose, config, offline=offline)
 
 
 @main.command("diff")
 @_add_options(_COMPARE_OPTIONS)
 def diff(source, target, key, mode, output, out, threshold,
          source_format, target_format, where, sample, limit,
-         ignore_columns, verbose, config):
+         ignore_columns, verbose, config, offline):
     """
     Alias for compare. Same flags, same output.
 
@@ -313,7 +316,7 @@ def diff(source, target, key, mode, output, out, threshold,
     """
     _compare_command(source, target, key, mode, output, out, threshold,
                      source_format, target_format, where, sample, limit,
-                     ignore_columns, verbose, config)
+                     ignore_columns, verbose, config, offline=offline)
 
 
 @main.command("show")
