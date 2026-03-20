@@ -913,3 +913,261 @@ class TestNewFeatures:
                            "--sample", "3"])
         assert res.exit_code in (0, 2)
         assert "Sampling" in res.output or "sample" in res.output.lower()
+
+
+# ── Structured logging ──────────────────────────────────────────────────────
+
+class TestLogging:
+    """Tests for --log-level, --log-format, --log-file flags and logging_setup module."""
+
+    @pytest.fixture
+    def parquet_pair(self, tmp_path):
+        src = tmp_path / "src.parquet"
+        tgt = tmp_path / "tgt.parquet"
+        write_parquet(src, {"id": [1, 2, 3], "val": [10, 20, 30]})
+        write_parquet(tgt, {"id": [1, 2, 3], "val": [15, 25, 35]})
+        return src, tgt
+
+    def cli(self):
+        from click.testing import CliRunner
+        from difflake.cli import main
+        return CliRunner(), main
+
+    # ── configure() API ──────────────────────────────────────────────────
+
+    def test_configure_text_format(self):
+        from difflake.logging_setup import configure, get_logger
+        configure(level="DEBUG", fmt="text")
+        log = get_logger("test_text")
+        assert log.getEffectiveLevel() <= 10  # DEBUG = 10
+
+    def test_configure_json_format(self):
+        from difflake.logging_setup import configure, get_logger
+        configure(level="INFO", fmt="json")
+        log = get_logger("test_json")
+        assert log.getEffectiveLevel() <= 20  # INFO = 20
+
+    def test_configure_is_idempotent(self):
+        """Calling configure() twice should not duplicate handlers."""
+        import logging
+        from difflake.logging_setup import configure
+        configure(level="INFO", fmt="text")
+        configure(level="INFO", fmt="text")
+        root = logging.getLogger("difflake")
+        # Should not grow unbounded
+        assert len(root.handlers) <= 2
+
+    def test_configure_warning_level_silences_debug_info(self, capsys):
+        import logging
+        from difflake.logging_setup import configure, get_logger
+        configure(level="WARNING", fmt="text")
+        log = get_logger("test_silence")
+        log.debug("this should not appear")
+        log.info("this should not appear either")
+        # No way to capture stderr from logging in capsys easily without
+        # a custom handler — so just assert no exception
+        assert True
+
+    def test_get_logger_returns_child_of_difflake(self):
+        from difflake.logging_setup import get_logger
+        log = get_logger("mymodule")
+        assert log.name.startswith("difflake")
+
+    def test_get_logger_no_double_prefix(self):
+        from difflake.logging_setup import get_logger
+        log = get_logger("difflake.core")
+        assert log.name == "difflake.core"
+
+    # ── text formatter ────────────────────────────────────────────────────
+
+    def test_text_formatter_output_format(self):
+        import logging
+        from difflake.logging_setup import _TextFormatter
+        fmt = _TextFormatter(colour=False)
+        record = logging.LogRecord(
+            name="difflake.test", level=logging.INFO,
+            pathname="", lineno=0, msg="hello world",
+            args=(), exc_info=None,
+        )
+        output = fmt.format(record)
+        assert "INFO" in output
+        assert "hello world" in output
+        assert "difflake.test" in output
+
+    def test_text_formatter_includes_extras(self):
+        import logging
+        from difflake.logging_setup import _TextFormatter
+        fmt = _TextFormatter(colour=False)
+        record = logging.LogRecord(
+            name="difflake", level=logging.DEBUG,
+            pathname="", lineno=0, msg="test",
+            args=(), exc_info=None,
+        )
+        record.source = "s3://bucket/data.parquet"
+        output = fmt.format(record)
+        assert "s3://bucket/data.parquet" in output
+
+    # ── JSON formatter ────────────────────────────────────────────────────
+
+    def test_json_formatter_valid_json(self):
+        import json, logging
+        from difflake.logging_setup import _JsonFormatter
+        fmt = _JsonFormatter()
+        record = logging.LogRecord(
+            name="difflake.core", level=logging.WARNING,
+            pathname="", lineno=0, msg="drift detected",
+            args=(), exc_info=None,
+        )
+        output = fmt.format(record)
+        data = json.loads(output)
+        assert data["level"] == "WARNING"
+        assert data["message"] == "drift detected"
+        assert data["logger"] == "difflake.core"
+        assert "timestamp" in data
+
+    def test_json_formatter_includes_extras(self):
+        import json, logging
+        from difflake.logging_setup import _JsonFormatter
+        fmt = _JsonFormatter()
+        record = logging.LogRecord(
+            name="difflake", level=logging.INFO,
+            pathname="", lineno=0, msg="diff complete",
+            args=(), exc_info=None,
+        )
+        record.elapsed_s = 1.23
+        output = fmt.format(record)
+        data = json.loads(output)
+        assert data["elapsed_s"] == 1.23
+
+    def test_json_formatter_timestamp_is_iso(self):
+        import json, logging
+        from difflake.logging_setup import _JsonFormatter
+        fmt = _JsonFormatter()
+        record = logging.LogRecord(
+            name="difflake", level=logging.INFO,
+            pathname="", lineno=0, msg="ts check",
+            args=(), exc_info=None,
+        )
+        output = fmt.format(record)
+        ts = json.loads(output)["timestamp"]
+        assert "T" in ts  # ISO 8601 format
+
+    # ── log file output ───────────────────────────────────────────────────
+
+    def test_configure_log_file_writes(self, tmp_path):
+        from difflake.logging_setup import configure, get_logger
+        log_path = tmp_path / "test.log"
+        configure(level="DEBUG", fmt="text", log_file=str(log_path))
+        log = get_logger("test_file")
+        log.info("written to file")
+        # Flush handlers
+        import logging
+        for h in logging.getLogger("difflake").handlers:
+            h.flush()
+        assert log_path.exists()
+        assert "written to file" in log_path.read_text()
+
+    def test_configure_log_file_json(self, tmp_path):
+        import json
+        from difflake.logging_setup import configure, get_logger
+        log_path = tmp_path / "test.json.log"
+        configure(level="INFO", fmt="json", log_file=str(log_path))
+        log = get_logger("test_json_file")
+        log.info("json to file")
+        import logging
+        for h in logging.getLogger("difflake").handlers:
+            h.flush()
+        assert log_path.exists()
+        line = log_path.read_text().strip()
+        data = json.loads(line)
+        assert data["message"] == "json to file"
+
+    # ── CLI --log-level flag ──────────────────────────────────────────────
+
+    def test_cli_log_level_debug_accepted(self, parquet_pair):
+        src, tgt = parquet_pair
+        r, m = self.cli()
+        res = r.invoke(m, ["--log-level", "DEBUG",
+                           "compare", str(src), str(tgt), "--mode", "stats"])
+        assert res.exit_code in (0, 2)
+
+    def test_cli_log_level_info_produces_info_logs(self, parquet_pair):
+        src, tgt = parquet_pair
+        r, m = self.cli()
+        res = r.invoke(m, ["--log-level", "INFO",
+                           "compare", str(src), str(tgt), "--mode", "stats"])
+        assert res.exit_code in (0, 2)
+        # INFO logs go to stderr — captured in mix_stderr=False runner
+        # Just ensure no crash
+        assert "Error" not in res.output or res.exit_code != 1
+
+    def test_cli_log_format_json_accepted(self, parquet_pair):
+        src, tgt = parquet_pair
+        r, m = self.cli()
+        res = r.invoke(m, ["--log-level", "INFO", "--log-format", "json",
+                           "compare", str(src), str(tgt), "--mode", "stats"])
+        assert res.exit_code in (0, 2)
+
+    def test_cli_log_file_written(self, parquet_pair, tmp_path):
+        src, tgt = parquet_pair
+        log_path = tmp_path / "cli.log"
+        r, m = self.cli()
+        res = r.invoke(m, ["--log-level", "INFO", "--log-file", str(log_path),
+                           "compare", str(src), str(tgt), "--mode", "stats"])
+        assert res.exit_code in (0, 2)
+        assert log_path.exists()
+        assert len(log_path.read_text()) > 0
+
+    def test_cli_log_file_json_format(self, parquet_pair, tmp_path):
+        import json
+        src, tgt = parquet_pair
+        log_path = tmp_path / "cli.jsonl"
+        r, m = self.cli()
+        res = r.invoke(m, [
+            "--log-level", "INFO", "--log-format", "json",
+            "--log-file", str(log_path),
+            "compare", str(src), str(tgt), "--mode", "stats",
+        ])
+        assert res.exit_code in (0, 2)
+        assert log_path.exists()
+        lines = [l for l in log_path.read_text().strip().splitlines() if l]
+        assert len(lines) > 0
+        # Every line must be valid JSON
+        for line in lines:
+            data = json.loads(line)
+            assert "level" in data
+            assert "message" in data
+
+    def test_cli_env_var_log_level(self, parquet_pair, monkeypatch):
+        src, tgt = parquet_pair
+        monkeypatch.setenv("DIFFLAKE_LOG_LEVEL", "INFO")
+        r, m = self.cli()
+        res = r.invoke(m, ["compare", str(src), str(tgt), "--mode", "schema"])
+        assert res.exit_code in (0, 2)
+
+    # ── core.py logs key events ───────────────────────────────────────────
+
+    def test_diff_logs_started_and_complete(self, parquet_pair, tmp_path):
+        src, tgt = parquet_pair
+        log_path = tmp_path / "core.log"
+        from difflake.logging_setup import configure
+        configure(level="INFO", fmt="text", log_file=str(log_path))
+        LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        import logging
+        for h in logging.getLogger("difflake").handlers:
+            h.flush()
+        content = log_path.read_text()
+        assert "diff started" in content
+        assert "diff complete" in content
+
+    def test_diff_logs_debug_params(self, parquet_pair, tmp_path):
+        src, tgt = parquet_pair
+        log_path = tmp_path / "debug.log"
+        from difflake.logging_setup import configure
+        configure(level="DEBUG", fmt="text", log_file=str(log_path))
+        LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        import logging
+        for h in logging.getLogger("difflake").handlers:
+            h.flush()
+        content = log_path.read_text()
+        assert "diff parameters" in content

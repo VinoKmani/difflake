@@ -18,7 +18,10 @@ from difflake.connection import DuckDBConnection, _detect_format, _read_sql
 from difflake.differ.row_differ import RowDiffer
 from difflake.differ.schema_differ import SchemaDiffer
 from difflake.differ.stats_differ import StatsDiffer
+from difflake.logging_setup import get_logger
 from difflake.models import DiffResult
+
+log = get_logger(__name__)
 
 DiffMode = Literal["full", "schema", "stats", "rows"]
 
@@ -108,6 +111,25 @@ class LakeDiff:
         src_fmt = self.source_format or _detect_format(self.source)
         tgt_fmt = self.target_format or _detect_format(self.target)
 
+        log.info(
+            "diff started",
+            extra={
+                "source": self.source, "target": self.target,
+                "mode": self.mode, "src_fmt": src_fmt, "tgt_fmt": tgt_fmt,
+            },
+        )
+        log.debug(
+            "diff parameters",
+            extra={
+                "primary_key": self.primary_key,
+                "drift_threshold": self.drift_threshold,
+                "sample_size": self.sample_size,
+                "limit": self.limit,
+                "where": self.where,
+                "ignore_columns": self.ignore_columns,
+            },
+        )
+
         # ── Open DuckDB connection ─────────────────────────────────────────
         con = DuckDBConnection()
 
@@ -167,9 +189,18 @@ class LakeDiff:
 
             # ── Schema diff ────────────────────────────────────────────────
             if self.mode in ("full", "schema"):
+                log.debug("running schema diff")
                 result.schema_diff = SchemaDiffer(
                     con, "__src_schema", "__tgt_schema"
                 ).run()
+                log.info(
+                    "schema diff complete",
+                    extra={
+                        "added": len(result.schema_diff.added_columns),
+                        "removed": len(result.schema_diff.removed_columns),
+                        "type_changed": len(result.schema_diff.type_changed_columns),
+                    },
+                )
 
             # ── Register working views (with sample + where filter) ────────
             run_stats = self.mode in ("full", "stats")
@@ -230,11 +261,20 @@ class LakeDiff:
 
             # ── Row diff ───────────────────────────────────────────────────
             if run_rows:
+                log.debug("running row diff", extra={"primary_key": self.primary_key})
                 result.row_diff = RowDiffer(
                     con, "__src", "__tgt",
                     primary_key=self.primary_key,
                     # sample already applied via _read_sql above
                 ).run()
+                log.info(
+                    "row diff complete",
+                    extra={
+                        "rows_added": result.row_diff.rows_added,
+                        "rows_removed": result.row_diff.rows_removed,
+                        "rows_changed": result.row_diff.rows_changed,
+                    },
+                )
                 # Patch row counts to reflect actual file sizes (not sample)
                 if self.sample_size:
                     result.row_diff.row_count_before = int(
@@ -250,6 +290,7 @@ class LakeDiff:
 
             # ── Stats diff ─────────────────────────────────────────────────
             if run_stats:
+                log.debug("running stats diff")
                 # Build effective column list — respect both --columns and --ignore-columns
                 diff_cols = self.columns
                 if self.ignore_columns:
@@ -266,6 +307,21 @@ class LakeDiff:
             # ── Drift alerts ───────────────────────────────────────────────
             result.drift_alerts    = self._build_alerts(result)
             result.elapsed_seconds = round(time.perf_counter() - t0, 3)
+
+            elapsed = result.elapsed_seconds
+            log.info(
+                "diff complete",
+                extra={
+                    "elapsed_s": elapsed,
+                    "drift_alerts": len(result.drift_alerts),
+                    "drifted_columns": len(result.stats_diff.drifted_columns),
+                },
+            )
+            if result.drift_alerts:
+                log.warning(
+                    "drift alerts detected",
+                    extra={"alerts": result.drift_alerts},
+                )
 
         finally:
             con.close()

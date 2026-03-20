@@ -125,9 +125,24 @@ def _render_error(e):
 
 @click.group()
 @click.version_option(package_name="difflake", prog_name="difflake")
-def main():
+@click.option("--log-level", default="WARNING",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    show_default=True, envvar="DIFFLAKE_LOG_LEVEL",
+    help="Logging verbosity level.")
+@click.option("--log-format", "log_fmt", default="text",
+    type=click.Choice(["text", "json"], case_sensitive=False),
+    show_default=True, envvar="DIFFLAKE_LOG_FORMAT",
+    help="Log output format: human-readable text or structured JSON.")
+@click.option("--log-file", default=None, type=click.Path(),
+    envvar="DIFFLAKE_LOG_FILE",
+    help="Append logs to a file in addition to stderr.")
+@click.pass_context
+def main(ctx, log_level, log_fmt, log_file):
     """🔍 difflake — git diff, but for your data lake."""
-    pass
+    from difflake.logging_setup import configure
+    configure(level=log_level, fmt=log_fmt, log_file=log_file)
+    ctx.ensure_object(dict)
+    ctx.obj["log_level"] = log_level
 
 
 def _compare_command(source, target, key, mode, output, out, threshold,
