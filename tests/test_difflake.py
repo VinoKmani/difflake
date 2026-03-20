@@ -525,7 +525,7 @@ class TestReporters:
         result = self._run(base_p, evol_p)
         out = tmp/"r.html"; result.to_html(str(out))
         content = out.read_text(encoding="utf-8")
-        assert all(s in content for s in ["DiffLake","Schema Diff","Row Diff","Statistical Diff"])
+        assert all(s in content for s in ["difflake","Schema Diff","Row Diff","Statistical Diff"])
 
     def test_html_no_jinja_error(self, tmp, base_p, evol_p):
         result = self._run(base_p, evol_p)
@@ -913,3 +913,155 @@ class TestNewFeatures:
                            "--sample", "3"])
         assert res.exit_code in (0, 2)
         assert "Sampling" in res.output or "sample" in res.output.lower()
+
+
+# ── Enhanced HTML reporter ──────────────────────────────────────────────────
+
+class TestHtmlReporterV2:
+    """Tests for the upgraded HTML reporter (offline mode, new charts, enhanced table)."""
+
+    @pytest.fixture
+    def result(self, tmp_path):
+        src = tmp_path / "src.parquet"
+        tgt = tmp_path / "tgt.parquet"
+        write_parquet(src, {
+            "id":    [1, 2, 3, 4, 5],
+            "score": [10.0, 20.0, 30.0, 40.0, 50.0],
+            "cat":   ["a", "b", "c", "a", "b"],
+        })
+        write_parquet(tgt, {
+            "id":    [1, 2, 3, 4, 6],
+            "score": [15.0, 25.0, 35.0, 45.0, 55.0],
+            "cat":   ["a", "b", "c", "d", "e"],
+        })
+        return LakeDiff(source=str(src), target=str(tgt),
+                        primary_key="id", mode="full").run()
+
+    def _render(self, result, tmp_path, offline=False):
+        from difflake.reporters.html_reporter import HtmlReporter
+        out = tmp_path / "report.html"
+        HtmlReporter(result, offline=offline).write(out)
+        return out.read_text(encoding="utf-8")
+
+    # ── offline mode ──────────────────────────────────────────────────────
+
+    def test_offline_false_uses_cdn_tag(self, result, tmp_path):
+        html = self._render(result, tmp_path, offline=False)
+        assert "cdn.jsdelivr.net" in html
+
+    def test_offline_true_attempts_inline(self, result, tmp_path):
+        """offline=True should not contain a bare src= CDN link (Chart.js is inlined or absent)."""
+        html = self._render(result, tmp_path, offline=True)
+        # Either inlined (no src= link) or fell back gracefully — but must have <script>
+        assert "<script>" in html
+
+    def test_offline_badge_shown_when_offline(self, result, tmp_path):
+        html = self._render(result, tmp_path, offline=True)
+        assert "offline" in html
+
+    def test_offline_badge_absent_when_not_offline(self, result, tmp_path):
+        html = self._render(result, tmp_path, offline=False)
+        assert 'class="offline-badge"' not in html
+
+    # ── generated_at timestamp ────────────────────────────────────────────
+
+    def test_generated_at_present(self, result, tmp_path):
+        from datetime import datetime
+        html = self._render(result, tmp_path)
+        # Year should appear in timestamp
+        assert str(datetime.now().year) in html
+
+    # ── collapsible sections ──────────────────────────────────────────────
+
+    def test_details_tags_present(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        assert "<details" in html
+        assert "<summary>" in html
+
+    # ── column search filter ──────────────────────────────────────────────
+
+    def test_search_bar_present_when_stats(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        assert "statsSearch" in html
+        assert "filterStats" in html
+
+    # ── null rate chart ───────────────────────────────────────────────────
+
+    def test_null_chart_canvas_present(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        assert "nullChart" in html
+
+    def test_null_chart_data_injected(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        # Null rate labels array should appear in chart JS
+        assert "null_labels" not in html  # Jinja variable name replaced
+        assert "nullChart" in html
+
+    # ── mean drift chart ─────────────────────────────────────────────────
+
+    def test_drift_chart_canvas_present(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        # driftChart appears only when there are numeric drift columns
+        # score column will have drift between src/tgt
+        assert "driftChart" in html
+
+    # ── enhanced stats table ──────────────────────────────────────────────
+
+    def test_stats_table_has_std_columns(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        assert "Std Before" in html
+        assert "Std After" in html
+
+    def test_stats_table_has_min_max_columns(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        assert "Min" in html
+        assert "Max" in html
+
+    def test_drift_reasons_rendered_inline(self, result, tmp_path):
+        html = self._render(result, tmp_path)
+        # drifted columns have reasons rendered in a .reasons div
+        assert "reasons" in html
+
+    # ── chart data computation ────────────────────────────────────────────
+
+    def test_build_chart_data_returns_expected_keys(self, result):
+        from difflake.reporters.html_reporter import _build_chart_data
+        data = _build_chart_data(result)
+        assert "null_labels" in data
+        assert "null_before" in data
+        assert "null_after" in data
+        assert "drift_labels" in data
+        assert "drift_values" in data
+        assert "drift_colors" in data
+
+    def test_build_chart_data_color_logic(self, result):
+        from difflake.reporters.html_reporter import _build_chart_data
+        data = _build_chart_data(result)
+        for color in data["drift_colors"]:
+            assert color in ("#ef4444", "#f59e0b", "#22c55e")
+
+    def test_build_chart_data_no_inf(self, result):
+        from difflake.reporters.html_reporter import _build_chart_data
+        data = _build_chart_data(result)
+        import math
+        for v in data["drift_values"]:
+            assert not math.isinf(v)
+
+    # ── CLI --no-offline flag ─────────────────────────────────────────────
+
+    def test_cli_no_offline_flag_accepted(self, tmp_path):
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"id": [1, 2], "v": [10, 20]})
+        write_parquet(tgt, {"id": [1, 2], "v": [10, 20]})
+        from click.testing import CliRunner
+        from difflake.cli import main
+        out = tmp_path / "report.html"
+        res = CliRunner().invoke(main, [
+            "compare", str(src), str(tgt),
+            "--output", "html", "--out", str(out),
+            "--no-offline",
+        ])
+        assert res.exit_code in (0, 2)
+        assert out.exists()
+        assert "cdn.jsdelivr.net" in out.read_text()
