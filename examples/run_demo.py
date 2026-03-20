@@ -1,86 +1,116 @@
 """
 examples/run_demo.py — Generates two versions of a realistic user dataset
-and runs a full diff, outputting CLI, JSON, HTML, and Markdown reports.
+using pure DuckDB (no Polars or pandas required) and runs a full diff,
+outputting CLI, JSON, HTML, and Markdown reports.
 
 Run from the repo root:
     python examples/run_demo.py
+
+Requirements:
+    pip install difflake
 """
 
 from __future__ import annotations
 
-import random
 from pathlib import Path
-import polars as pl
 
-# ── Generate realistic synthetic datasets ──────────────────────────────────
-
-random.seed(42)
-
-COUNTRIES = ["US", "UK", "CA", "DE", "AU", "FR"]
-STATUSES_V1 = ["active", "inactive", "churned"]
-STATUSES_V2 = ["active", "inactive", "churned", "suspended"]   # 'suspended' is new
-TIERS = ["free", "pro", "enterprise"]
-
-N_V1 = 50_000
-N_V2 = 52_500   # 2,500 new users added
+import duckdb
 
 
-def make_v1(n: int) -> pl.DataFrame:
-    rng = random.Random(1)
-    return pl.DataFrame({
-        "user_id": list(range(1, n + 1)),
-        "name": [f"User_{i}" for i in range(1, n + 1)],
-        "age": [rng.randint(18, 70) for _ in range(n)],
-        "revenue": [round(rng.uniform(10, 5000), 2) for _ in range(n)],
-        "country": [rng.choice(COUNTRIES) for _ in range(n)],
-        "status": [rng.choice(STATUSES_V1) for _ in range(n)],
-        "signup_year": [rng.randint(2018, 2023) for _ in range(n)],
-    })
+def generate_datasets(out_dir: Path) -> tuple[Path, Path]:
+    """Generate v1 and v2 user Parquet files using DuckDB SQL."""
+    src = out_dir / "users_v1.parquet"
+    tgt = out_dir / "users_v2.parquet"
 
+    con = duckdb.connect()
 
-def make_v2(v1: pl.DataFrame, extra: int) -> pl.DataFrame:
-    rng = random.Random(2)
+    # ── v1: 50,000 users ─────────────────────────────────────────────────────
+    con.execute("SELECT setseed(0.42)")
+    con.execute("""
+        CREATE TABLE users_v1 AS
+        SELECT
+            i                                                      AS user_id,
+            'User_' || i                                           AS name,
+            (18 + (random() * 52)::INTEGER)                        AS age,
+            round((10 + random() * 4990)::DECIMAL, 2)              AS revenue,
+            CASE (random() * 6)::INTEGER
+                WHEN 0 THEN 'US' WHEN 1 THEN 'UK' WHEN 2 THEN 'CA'
+                WHEN 3 THEN 'DE' WHEN 4 THEN 'AU' ELSE 'FR'
+            END                                                    AS country,
+            CASE (random() * 3)::INTEGER
+                WHEN 0 THEN 'active' WHEN 1 THEN 'inactive' ELSE 'churned'
+            END                                                    AS status,
+            (2018 + (random() * 5)::INTEGER)                       AS signup_year
+        FROM range(1, 50001) t(i)
+    """)
+    con.execute(f"COPY users_v1 TO '{src}' (FORMAT PARQUET)")
+    n_v1 = con.execute("SELECT COUNT(*) FROM users_v1").fetchone()[0]
+    print(f"   ✅ v1: {n_v1:,} rows → {src}")
 
-    # Mutate ~5% of existing rows (revenue changes)
-    n = len(v1)
-    revenues = v1["revenue"].to_list()
-    ages_float = [float(a) for a in v1["age"].to_list()]   # int → float (type drift)
-    statuses = v1["status"].to_list()
+    # ── v2: mutate existing rows + add 2,500 new users ───────────────────────
+    # Changes vs v1:
+    #   - age column: INTEGER → DOUBLE  (type drift)
+    #   - ~5% of revenues changed
+    #   - ~2% of statuses changed; 'suspended' is a new category
+    #   - new column: subscription_tier
+    #   - 2,500 new rows added (some with new country 'JP')
 
-    mutated_revenues = [
-        round(rev * rng.uniform(0.9, 1.4), 2) if rng.random() < 0.05 else rev
-        for rev in revenues
-    ]
-    mutated_statuses = [
-        rng.choice(STATUSES_V2) if rng.random() < 0.02 else s
-        for s in statuses
-    ]
+    con.execute("SELECT setseed(0.84)")
+    con.execute("""
+        CREATE TABLE users_v2 AS
 
-    existing = pl.DataFrame({
-        "user_id": v1["user_id"].to_list(),
-        "name": v1["name"].to_list(),
-        "age": ages_float,                    # ← type changed int→float
-        "revenue": mutated_revenues,
-        "country": v1["country"].to_list(),
-        "status": mutated_statuses,
-        "signup_year": v1["signup_year"].to_list(),
-        "subscription_tier": [rng.choice(TIERS) for _ in range(n)],  # ← new column
-    })
+        -- Mutated existing rows
+        SELECT
+            user_id,
+            name,
+            age::DOUBLE                                             AS age,
+            CASE WHEN random() < 0.05
+                THEN round(revenue * (0.9 + random() * 0.5), 2)
+                ELSE revenue
+            END                                                     AS revenue,
+            country,
+            CASE WHEN random() < 0.02
+                THEN CASE (random() * 4)::INTEGER
+                    WHEN 0 THEN 'active' WHEN 1 THEN 'inactive'
+                    WHEN 2 THEN 'churned' ELSE 'suspended'
+                END
+                ELSE status
+            END                                                     AS status,
+            signup_year,
+            CASE (random() * 3)::INTEGER
+                WHEN 0 THEN 'free' WHEN 1 THEN 'pro' ELSE 'enterprise'
+            END                                                     AS subscription_tier
+        FROM users_v1
 
-    # Add new rows
-    base_id = n + 1
-    new_rows = pl.DataFrame({
-        "user_id": list(range(base_id, base_id + extra)),
-        "name": [f"User_{i}" for i in range(base_id, base_id + extra)],
-        "age": [float(rng.randint(18, 70)) for _ in range(extra)],
-        "revenue": [round(rng.uniform(10, 5000), 2) for _ in range(extra)],
-        "country": [rng.choice(COUNTRIES + ["AU", "JP"]) for _ in range(extra)],  # AU & JP new
-        "status": [rng.choice(STATUSES_V2) for _ in range(extra)],
-        "signup_year": [rng.randint(2023, 2025) for _ in range(extra)],
-        "subscription_tier": [rng.choice(TIERS) for _ in range(extra)],
-    })
+        UNION ALL
 
-    return pl.concat([existing, new_rows])
+        -- 2,500 new users
+        SELECT
+            50000 + i                                               AS user_id,
+            'User_' || (50000 + i)                                  AS name,
+            (18 + (random() * 52)::DOUBLE)                          AS age,
+            round((10 + random() * 4990)::DECIMAL, 2)               AS revenue,
+            CASE (random() * 7)::INTEGER
+                WHEN 0 THEN 'US' WHEN 1 THEN 'UK' WHEN 2 THEN 'CA'
+                WHEN 3 THEN 'DE' WHEN 4 THEN 'AU' WHEN 5 THEN 'FR'
+                ELSE 'JP'
+            END                                                     AS country,
+            CASE (random() * 4)::INTEGER
+                WHEN 0 THEN 'active' WHEN 1 THEN 'inactive'
+                WHEN 2 THEN 'churned' ELSE 'suspended'
+            END                                                     AS status,
+            (2023 + (random() * 2)::INTEGER)                        AS signup_year,
+            CASE (random() * 3)::INTEGER
+                WHEN 0 THEN 'free' WHEN 1 THEN 'pro' ELSE 'enterprise'
+            END                                                     AS subscription_tier
+        FROM range(1, 2501) t(i)
+    """)
+    con.execute(f"COPY users_v2 TO '{tgt}' (FORMAT PARQUET)")
+    n_v2 = con.execute("SELECT COUNT(*) FROM users_v2").fetchone()[0]
+    print(f"   ✅ v2: {n_v2:,} rows → {tgt}")
+
+    con.close()
+    return src, tgt
 
 
 def main():
@@ -88,19 +118,12 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("🔧 Generating synthetic datasets...")
-    v1 = make_v1(N_V1)
-    v2 = make_v2(v1, extra=N_V2 - N_V1)
+    src, tgt = generate_datasets(out_dir)
 
-    src = out_dir / "users_v1.parquet"
-    tgt = out_dir / "users_v2.parquet"
-    v1.write_parquet(src)
-    v2.write_parquet(tgt)
-    print(f"   ✅ v1: {len(v1):,} rows → {src}")
-    print(f"   ✅ v2: {len(v2):,} rows → {tgt}")
-
-    # ── Run diff ────────────────────────────────────────────────────────────
+    # ── Run diff ─────────────────────────────────────────────────────────────
     print("\n🔍 Running diff...")
     from difflake import LakeDiff
+    from difflake.reporters.cli_reporter import CliReporter
 
     result = LakeDiff(
         source=src,
@@ -109,21 +132,20 @@ def main():
         drift_threshold=0.10,
     ).run()
 
-    # ── CLI output ──────────────────────────────────────────────────────────
-    from difflake.reporters.cli_reporter import CliReporter
+    # ── CLI output ────────────────────────────────────────────────────────────
     CliReporter(result, verbose=True).render()
 
-    # ── JSON report ─────────────────────────────────────────────────────────
+    # ── JSON report ───────────────────────────────────────────────────────────
     json_path = out_dir / "diff_report.json"
     result.to_json(str(json_path))
     print(f"📄 JSON report: {json_path}")
 
-    # ── HTML report ─────────────────────────────────────────────────────────
+    # ── HTML report ───────────────────────────────────────────────────────────
     html_path = out_dir / "diff_report.html"
     result.to_html(str(html_path))
     print(f"🌐 HTML report: {html_path}")
 
-    # ── Markdown report ─────────────────────────────────────────────────────
+    # ── Markdown report ───────────────────────────────────────────────────────
     md_path = out_dir / "diff_report.md"
     result.to_markdown(str(md_path))
     print(f"📝 Markdown report: {md_path}")
