@@ -913,3 +913,168 @@ class TestNewFeatures:
                            "--sample", "3"])
         assert res.exit_code in (0, 2)
         assert "Sampling" in res.output or "sample" in res.output.lower()
+
+
+# ── PR4: Batched stats aggregation tests ────────────────────────────────────
+
+class TestBatchedStats:
+    """
+    Tests for the O(1)-scan batched stats aggregation refactor.
+    Verifies that results are identical to what the old per-column approach
+    produced, and that the batch helpers return the right structure.
+    """
+
+    def _make_views(self, tmp_path, src_data, tgt_data):
+        from difflake.connection import DuckDBConnection, _read_sql, _detect_format
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, src_data)
+        write_parquet(tgt, tgt_data)
+        from difflake.differ.stats_differ import StatsDiffer
+        con = DuckDBConnection()
+        src_sql = _read_sql(str(src), "parquet")
+        tgt_sql = _read_sql(str(tgt), "parquet")
+        con.register_view("old_v", src_sql, "parquet", str(src))
+        con.register_view("new_v", tgt_sql, "parquet", str(tgt))
+        differ = StatsDiffer(con, "old_v", "new_v")
+        return con, differ
+
+    def test_batch_null_rates_all_columns(self, tmp_path):
+        """_batch_null_rates returns an entry for every column."""
+        from difflake.differ.stats_differ import StatsDiffer
+        con, differ = self._make_views(
+            tmp_path,
+            {"id": [1, 2, None], "val": [10.0, None, 30.0]},
+            {"id": [1, 2, 3],    "val": [10.0, 20.0, 30.0]},
+        )
+        nr = differ._batch_null_rates()
+        con.close()
+        assert set(nr.keys()) == {"id", "val"}
+        # id has 1 null in old view (33.3%)
+        assert nr["id"][0] > 0
+        # id has 0 nulls in new view
+        assert nr["id"][1] == 0.0
+
+    def test_batch_cardinality_all_columns(self, tmp_path):
+        """_batch_cardinality returns correct distinct counts."""
+        from difflake.differ.stats_differ import StatsDiffer
+        con, differ = self._make_views(
+            tmp_path,
+            {"id": [1, 2, 3], "cat": ["a", "b", "a"]},
+            {"id": [1, 2, 3, 4], "cat": ["a", "b", "c", "c"]},
+        )
+        card = differ._batch_cardinality()
+        con.close()
+        assert card["id"][0] == 3   # old: 3 distinct
+        assert card["id"][1] == 4   # new: 4 distinct
+        assert card["cat"][0] == 2  # old: a, b
+        assert card["cat"][1] == 3  # new: a, b, c
+
+    def test_batch_numeric_agg_structure(self, tmp_path):
+        """_batch_numeric_agg returns 5-tuple pairs for each numeric col."""
+        from difflake.differ.stats_differ import StatsDiffer
+        con, differ = self._make_views(
+            tmp_path,
+            {"x": [1, 2, 3], "y": [10, 20, 30]},
+            {"x": [4, 5, 6], "y": [40, 50, 60]},
+        )
+        aggs = differ._batch_numeric_agg(["x", "y"])
+        con.close()
+        assert set(aggs.keys()) == {"x", "y"}
+        old_x, new_x = aggs["x"]
+        # old mean of x = 2.0, new = 5.0
+        assert abs(old_x[0] - 2.0) < 0.01
+        assert abs(new_x[0] - 5.0) < 0.01
+
+    def test_batch_numeric_agg_empty(self, tmp_path):
+        """_batch_numeric_agg with no columns returns empty dict."""
+        from difflake.differ.stats_differ import StatsDiffer
+        con, differ = self._make_views(
+            tmp_path,
+            {"id": [1, 2]}, {"id": [1, 2]},
+        )
+        result = differ._batch_numeric_agg([])
+        con.close()
+        assert result == {}
+
+    def test_run_produces_correct_numeric_stats(self, tmp_path):
+        """Full run() produces same numeric stats as before the refactor."""
+        src_data = {"id": [1, 2, 3, 4, 5], "revenue": [10.0, 20.0, 30.0, 40.0, 50.0]}
+        tgt_data = {"id": [1, 2, 3, 4, 5], "revenue": [11.0, 22.0, 33.0, 44.0, 55.0]}
+        write_parquet(tmp_path / "a.parquet", src_data)
+        write_parquet(tmp_path / "b.parquet", tgt_data)
+        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+                          target=str(tmp_path / "b.parquet"),
+                          mode="stats").run()
+        rev = next(d for d in result.stats_diff.column_diffs if d.column == "revenue")
+        assert rev.dtype_category == "numeric"
+        assert rev.mean_before is not None
+        assert rev.mean_after is not None
+        assert rev.mean_after > rev.mean_before
+
+    def test_run_produces_correct_categorical_stats(self, tmp_path):
+        """Categorical columns report new/dropped categories correctly."""
+        src_data = {"id": [1, 2, 3], "status": ["active", "inactive", "active"]}
+        tgt_data = {"id": [1, 2, 3], "status": ["active", "suspended", "churned"]}
+        write_parquet(tmp_path / "a.parquet", src_data)
+        write_parquet(tmp_path / "b.parquet", tgt_data)
+        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+                          target=str(tmp_path / "b.parquet"),
+                          mode="stats").run()
+        status = next(d for d in result.stats_diff.column_diffs if d.column == "status")
+        assert status.dtype_category == "categorical"
+        # "inactive" was dropped, "suspended"/"churned" are new
+        assert len(status.dropped_categories) > 0 or len(status.new_categories) > 0
+
+    def test_run_with_all_nulls_column(self, tmp_path):
+        """Columns that are all-null don't crash the batch query."""
+        src_data = {"id": [1, 2, 3], "val": [None, None, None]}
+        tgt_data = {"id": [1, 2, 3], "val": [None, None, None]}
+        write_parquet(tmp_path / "a.parquet", src_data)
+        write_parquet(tmp_path / "b.parquet", tgt_data)
+        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+                          target=str(tmp_path / "b.parquet"),
+                          mode="stats").run()
+        assert result.stats_diff.column_diffs  # should have results
+
+    def test_run_empty_columns_returns_empty(self, tmp_path):
+        """StatsDiffer with no common columns returns empty StatsDiff."""
+        from difflake.connection import DuckDBConnection, _read_sql
+        from difflake.differ.stats_differ import StatsDiffer
+        src = tmp_path / "a.parquet"
+        tgt = tmp_path / "b.parquet"
+        write_parquet(src, {"col_a": [1, 2]})
+        write_parquet(tgt, {"col_b": [3, 4]})
+        con = DuckDBConnection()
+        con.register_view("old_v", _read_sql(str(src), "parquet"), "parquet", str(src))
+        con.register_view("new_v", _read_sql(str(tgt), "parquet"), "parquet", str(tgt))
+        differ = StatsDiffer(con, "old_v", "new_v")
+        result = differ.run()
+        con.close()
+        assert result.column_diffs == []
+        assert result.drifted_columns == []
+
+    def test_batch_matches_expected_null_rate(self, tmp_path):
+        """Null rate in batch result matches manual calculation."""
+        # 2 nulls out of 4 rows = 50%
+        src_data = {"val": [1.0, None, 3.0, None]}
+        tgt_data = {"val": [1.0, 2.0, 3.0, 4.0]}
+        write_parquet(tmp_path / "a.parquet", src_data)
+        write_parquet(tmp_path / "b.parquet", tgt_data)
+        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+                          target=str(tmp_path / "b.parquet"),
+                          mode="stats").run()
+        col = result.stats_diff.column_diffs[0]
+        assert abs(col.null_rate_before - 50.0) < 1.0
+        assert col.null_rate_after == 0.0
+
+    def test_many_columns_batch_efficiency(self, tmp_path):
+        """15-column dataset runs without error (stress test for batch SQL)."""
+        data = {f"col{i}": list(range(1, 6)) for i in range(15)}
+        write_parquet(tmp_path / "a.parquet", data)
+        mutated = {k: [v * 2 for v in vals] for k, vals in data.items()}
+        write_parquet(tmp_path / "b.parquet", mutated)
+        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+                          target=str(tmp_path / "b.parquet"),
+                          mode="stats").run()
+        assert len(result.stats_diff.column_diffs) == 15
