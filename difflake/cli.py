@@ -4,6 +4,7 @@ CLI entrypoint — difflake compare / diff / show / formats
 
 from __future__ import annotations
 
+import csv
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -661,6 +662,115 @@ def _show_freq(con, col, total_rows, path, where_tag):
         tbl.add_row(display_val, f"{int(count):,}", f"{pct:.1f}%", bar)
     console.print(tbl)
     console.print(f"  [dim]Top 10 of {total_rows:,} rows[/dim]\n")
+
+
+@main.command("query")
+@click.argument("path", type=click.Path())
+@click.argument("sql")
+@click.option("--format", "fmt", default=None,
+    type=click.Choice(_ALL_FORMATS, case_sensitive=False),
+    help="Explicit format override (auto-detected by default).")
+@click.option("--output", "-o",
+    type=click.Choice(["cli", "json", "csv"], case_sensitive=False),
+    default="cli", show_default=True,
+    help="Output format: cli (Rich table), json, or csv.")
+@click.option("--out", "-O", default=None, type=click.Path(),
+    help="Write output to file (auto-named when --output json/csv).")
+@click.option("--limit", default=None, type=int,
+    help="Limit result rows. e.g. --limit 1000.")
+@click.option("--no-header", is_flag=True,
+    help="Suppress column header row (csv/cli output).")
+def query(path, sql, fmt, output, out, limit, no_header):
+    """
+    Run a SQL query against any dataset. Use 't' as the table alias.
+
+    \b
+    Examples:
+      difflake query data.parquet "SELECT * FROM t WHERE age > 30"
+      difflake query data.parquet "SELECT status, COUNT(*) FROM t GROUP BY 1"
+      difflake query data.csv "SELECT AVG(fare_amount) FROM t"
+      difflake query data.parquet "SELECT * FROM t" --output csv --out result.csv
+      difflake query s3://bucket/data.parquet "SELECT COUNT(*) FROM t"
+    """
+    from rich.status import Status
+
+    from difflake.connection import DuckDBConnection, _detect_format, _read_sql
+
+    try:
+        con = DuckDBConnection()
+        detected_fmt = fmt or _detect_format(path)
+        base_sql = _read_sql(path, detected_fmt)
+        con.register_view("t", base_sql, detected_fmt, path)
+
+        run_sql = sql.strip()
+        if limit:
+            # Wrap in subquery to apply limit safely
+            run_sql = f"SELECT * FROM ({run_sql}) __q LIMIT {limit}"
+
+        with Status(f"Querying [cyan]{Path(path).name}[/cyan]...",
+                    console=console, spinner="dots"):
+            col_names, rows = con.fetchdf(run_sql)
+
+        con.close()
+
+    except FileNotFoundError as e:
+        err_console.print(f"[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+    except Exception as e:
+        err_console.print(f"[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+
+    n_rows = len(rows)
+    n_cols = len(col_names)
+
+    if output == "cli":
+        console.print()
+        tbl = Table(box=box.SIMPLE_HEAVY, show_header=not no_header,
+                    header_style="bold", padding=(0, 1))
+        for col in col_names:
+            tbl.add_column(col, min_width=8, max_width=30, overflow="fold")
+        for row in rows:
+            tbl.add_row(*[_fmt_val(v) for v in row])
+        console.print(tbl)
+        limit_note = f"  (limited to {limit:,})" if limit and n_rows >= limit else ""
+        console.print(f"  [dim]{n_rows:,} row{'s' if n_rows != 1 else ''} · "
+                      f"{n_cols} column{'s' if n_cols != 1 else ''}{limit_note}[/dim]\n")
+
+    elif output == "json":
+        import json as _json
+        records = [dict(zip(col_names, row)) for row in rows]
+
+        def _serial(v):
+            if v is None:
+                return None
+            try:
+                float(v)
+                return v
+            except (TypeError, ValueError):
+                return str(v)
+
+        records_safe = [{k: _serial(v) for k, v in rec.items()} for rec in records]
+        payload = _json.dumps(records_safe, indent=2, default=str)
+        if out:
+            Path(out).write_text(payload)
+            console.print(f"[green]✅ JSON -> {out}[/green] ({n_rows:,} rows)")
+        else:
+            console.print(payload)
+
+    elif output == "csv":
+        import io as _io
+        buf = _io.StringIO()
+        writer = csv.writer(buf)
+        if not no_header:
+            writer.writerow(col_names)
+        for row in rows:
+            writer.writerow(["" if v is None else v for v in row])
+        csv_text = buf.getvalue()
+        if out:
+            Path(out).write_text(csv_text)
+            console.print(f"[green]✅ CSV -> {out}[/green] ({n_rows:,} rows)")
+        else:
+            console.print(csv_text, end="")
 
 
 @main.command("formats")
