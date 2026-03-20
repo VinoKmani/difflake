@@ -6,6 +6,10 @@ No data is ever pulled into Python memory for stats computation.
 Works on datasets of any size — DuckDB spills to disk automatically.
 
 Supports all formats: CSV, Parquet, JSON, JSONL, Delta, Avro, Iceberg, S3, GCS, Azure.
+
+Performance: batch queries reduce wall-clock time from O(N) full-table scans
+to O(1) — null rates, cardinality, and numeric aggregations each run as a
+single query across all columns simultaneously.
 """
 
 from __future__ import annotations
@@ -164,6 +168,17 @@ class StatsDiffer:
     Computes per-column statistical drift entirely in DuckDB SQL.
     No row data is pulled into Python — all aggregations run server-side.
     Works on any size dataset; DuckDB handles spilling to disk automatically.
+
+    Query strategy:
+      - Null rates   : 1 query per view across ALL columns (batch)
+      - Cardinality  : 1 query per view across ALL columns (batch)
+      - Numeric agg  : 1 query per view across ALL numeric columns (batch)
+      - KL divergence: 1 query per numeric column (histogram, can't batch)
+      - Categorical  : 1 query per low-cardinality column (set diff)
+      - Datetime     : 1 query per view per datetime column (min/max bounds)
+
+    Total queries = 6 + N_numeric(KL) + N_categorical + 2*N_datetime
+    Previously   = 3*N (null + cardinality + agg × each column)
     """
 
     def __init__(
@@ -187,26 +202,68 @@ class StatsDiffer:
         self.old_schema    = old_schema
         self.new_schema    = new_schema
 
+    # ── Public entry point ─────────────────────────────────────────────────
+
     def run(self) -> StatsDiff:
+        if not self.columns:
+            return StatsDiff(column_diffs=[], drifted_columns=[])
+
+        # ── Categorise columns (Python-only, no queries) ───────────────────
+        col_categories: dict[str, str] = {}
+        numeric_cols:     list[str] = []
+        categorical_cols: list[str] = []
+        datetime_cols:    list[str] = []
+
+        for col in self.columns:
+            dtype = self.old_schema.get(col, "VARCHAR")
+            cat   = _dtype_category(dtype)
+            # VARCHAR columns storing ISO date strings → treat as datetime
+            if cat == "categorical" and _looks_like_dates(self.con, self.old_view, col):
+                cat = "datetime"
+            col_categories[col] = cat
+            if cat == "numeric":
+                numeric_cols.append(col)
+            elif cat == "categorical":
+                categorical_cols.append(col)
+            elif cat == "datetime":
+                datetime_cols.append(col)
+            # "other" columns are handled inline below
+
+        # ── Batch queries: 2 scans per metric regardless of column count ───
+        null_rates    = self._batch_null_rates()
+        cardinalities = self._batch_cardinality()
+        numeric_aggs  = self._batch_numeric_agg(numeric_cols)
+
+        # ── Assemble per-column diffs ──────────────────────────────────────
         column_diffs: list[ColumnStatsDiff] = []
 
         for col in self.columns:
-            dtype    = self.old_schema.get(col, "VARCHAR")
-            cat = _dtype_category(dtype)
-
-            # VARCHAR columns that contain ISO date strings should be
-            # treated as datetime for drift detection purposes
-            if cat == "categorical" and _looks_like_dates(self.con, self.old_view, col):
-                cat = "datetime"
+            null_before, null_after = null_rates[col]
+            card_before, card_after = cardinalities[col]
+            cat = col_categories[col]
 
             if cat == "numeric":
-                diff = self._numeric_diff(col)
+                diff = self._assemble_numeric(
+                    col, null_before, null_after, card_before, card_after,
+                    numeric_aggs[col],
+                )
             elif cat == "categorical":
-                diff = self._categorical_diff(col)
+                diff = self._assemble_categorical(
+                    col, null_before, null_after, card_before, card_after,
+                )
             elif cat == "datetime":
-                diff = self._datetime_diff(col)
+                diff = self._assemble_datetime(
+                    col, null_before, null_after, card_before, card_after,
+                )
             else:
-                diff = self._base_diff(col, cat)
+                diff = ColumnStatsDiff(
+                    column=col,
+                    dtype_category=cat,
+                    null_rate_before=null_before,
+                    null_rate_after=null_after,
+                    cardinality_before=card_before,
+                    cardinality_after=card_after,
+                )
 
             self._check_drift(diff)
             column_diffs.append(diff)
@@ -214,70 +271,95 @@ class StatsDiffer:
         drifted = [d.column for d in column_diffs if d.is_drifted]
         return StatsDiff(column_diffs=column_diffs, drifted_columns=drifted)
 
-    # ── Private helpers ────────────────────────────────────────────────────
+    # ── Batch query helpers (O(1) scans regardless of column count) ────────
 
-    def _null_rates(self, col: str) -> tuple[float, float]:
-        """Compute null rate for col in both views via a single SQL query."""
-        row = self.con.fetchone(f"""
-            SELECT
-                (SELECT COUNT(*) * 100.0 / NULLIF(COUNT(*), 0)
-                 FROM {self.old_view} WHERE "{col}" IS NULL)  AS old_null_pct,
-                (SELECT COUNT(*) * 100.0 / NULLIF(COUNT(*), 0)
-                 FROM {self.new_view} WHERE "{col}" IS NULL)  AS new_null_pct
-        """)
-        return (
-            round(float(row[0] or 0), 4),
-            round(float(row[1] or 0), 4),
+    def _batch_null_rates(self) -> dict[str, tuple[float, float]]:
+        """
+        Compute null-rate % for every column in a single table scan per view.
+        Returns {col: (old_pct, new_pct)}.
+        """
+        cols = self.columns
+        selects = ", ".join(
+            f'SUM(CASE WHEN "{c}" IS NULL THEN 1.0 ELSE 0.0 END)'
+            f' * 100.0 / NULLIF(COUNT(*), 0)'
+            for c in cols
         )
 
-    def _cardinality(self, col: str) -> tuple[int, int]:
-        row = self.con.fetchone(f"""
-            SELECT
-                (SELECT COUNT(DISTINCT "{col}") FROM {self.old_view}),
-                (SELECT COUNT(DISTINCT "{col}") FROM {self.new_view})
-        """)
-        return int(row[0] or 0), int(row[1] or 0)
+        def _fetch(view: str) -> list[float]:
+            row = self.con.fetchone(f"SELECT {selects} FROM {view}")
+            return [round(float(v or 0), 4) for v in (row or [None] * len(cols))]
 
-    def _base_diff(self, col: str, cat: str) -> ColumnStatsDiff:
-        null_before, null_after  = self._null_rates(col)
-        card_before, card_after  = self._cardinality(col)
-        return ColumnStatsDiff(
-            column=col,
-            dtype_category=cat,
-            null_rate_before=null_before,
-            null_rate_after=null_after,
-            cardinality_before=card_before,
-            cardinality_after=card_after,
+        old_vals = _fetch(self.old_view)
+        new_vals = _fetch(self.new_view)
+        return {col: (old_vals[i], new_vals[i]) for i, col in enumerate(cols)}
+
+    def _batch_cardinality(self) -> dict[str, tuple[int, int]]:
+        """
+        Compute COUNT(DISTINCT col) for every column in a single scan per view.
+        Returns {col: (old_card, new_card)}.
+        """
+        cols = self.columns
+        selects = ", ".join(f'COUNT(DISTINCT "{c}")' for c in cols)
+
+        def _fetch(view: str) -> list[int]:
+            row = self.con.fetchone(f"SELECT {selects} FROM {view}")
+            return [int(v or 0) for v in (row or [0] * len(cols))]
+
+        old_vals = _fetch(self.old_view)
+        new_vals = _fetch(self.new_view)
+        return {col: (old_vals[i], new_vals[i]) for i, col in enumerate(cols)}
+
+    def _batch_numeric_agg(
+        self, numeric_cols: list[str]
+    ) -> dict[str, tuple[tuple, tuple]]:
+        """
+        Compute AVG/MEDIAN/STDDEV/MIN/MAX for all numeric columns in one scan
+        per view. Returns {col: (old_5tuple, new_5tuple)}.
+        Each tuple is (avg, median, std, min, max).
+        """
+        if not numeric_cols:
+            return {}
+
+        # Build one SELECT expression with 5 aggregates per column
+        selects = ", ".join(
+            f'AVG(CAST("{c}" AS DOUBLE)), '
+            f'MEDIAN(CAST("{c}" AS DOUBLE)), '
+            f'STDDEV(CAST("{c}" AS DOUBLE)), '
+            f'MIN(CAST("{c}" AS DOUBLE)), '
+            f'MAX(CAST("{c}" AS DOUBLE))'
+            for c in numeric_cols
         )
 
-    def _numeric_diff(self, col: str) -> ColumnStatsDiff:
-        null_before, null_after = self._null_rates(col)
-        card_before, card_after = self._cardinality(col)
+        def _fetch(view: str) -> list[tuple]:
+            row = self.con.fetchone(f"SELECT {selects} FROM {view}")
+            if not row:
+                return [(None, None, None, None, None)] * len(numeric_cols)
+            return [
+                tuple(row[i * 5: i * 5 + 5])
+                for i in range(len(numeric_cols))
+            ]
+
+        old_vals = _fetch(self.old_view)
+        new_vals = _fetch(self.new_view)
+        return {col: (old_vals[i], new_vals[i]) for i, col in enumerate(numeric_cols)}
+
+    # ── Per-column assembly (no full-table scans) ──────────────────────────
+
+    def _assemble_numeric(
+        self,
+        col: str,
+        null_before: float, null_after: float,
+        card_before: int, card_after: int,
+        agg_pair: tuple[tuple, tuple],
+    ) -> ColumnStatsDiff:
+        """Assemble a numeric ColumnStatsDiff from pre-computed batch values."""
+        o, n = agg_pair
 
         def safe(v) -> float | None:
             return round(float(v), 6) if v is not None else None
 
-        # Single-pass aggregation for each view
-        def agg(view: str):
-            row = self.con.fetchone(f"""
-                SELECT
-                    AVG(CAST("{col}" AS DOUBLE)),
-                    MEDIAN(CAST("{col}" AS DOUBLE)),
-                    STDDEV(CAST("{col}" AS DOUBLE)),
-                    MIN(CAST("{col}" AS DOUBLE)),
-                    MAX(CAST("{col}" AS DOUBLE))
-                FROM {view}
-                WHERE "{col}" IS NOT NULL
-            """)
-            return row if row else (None,)*5
-
-        o = agg(self.old_view)
-        n = agg(self.new_view)
-
         mean_before = safe(o[0])
-        mean_after = safe(n[0])
-        mean_drift   = _pct_change(mean_before, mean_after)
-
+        mean_after  = safe(n[0])
         kl = _kl_divergence_sql(self.con, self.old_view, self.new_view, col)
 
         return ColumnStatsDiff(
@@ -289,7 +371,7 @@ class StatsDiffer:
             cardinality_after=card_after,
             mean_before=mean_before,
             mean_after=mean_after,
-            mean_drift_pct=mean_drift,
+            mean_drift_pct=_pct_change(mean_before, mean_after),
             median_before=safe(o[1]),
             median_after=safe(n[1]),
             std_before=safe(o[2]),
@@ -301,14 +383,16 @@ class StatsDiffer:
             kl_divergence=kl,
         )
 
-    def _categorical_diff(self, col: str) -> ColumnStatsDiff:
-        null_before, null_after = self._null_rates(col)
-        card_before, card_after = self._cardinality(col)
-
+    def _assemble_categorical(
+        self,
+        col: str,
+        null_before: float, null_after: float,
+        card_before: int, card_after: int,
+    ) -> ColumnStatsDiff:
+        """Assemble a categorical ColumnStatsDiff, enumerating new/dropped values."""
         new_cats: list[str]     = []
         dropped_cats: list[str] = []
 
-        # Only enumerate categories when cardinality is manageable
         if card_before <= _MAX_CARDINALITY_ENUM and card_after <= _MAX_CARDINALITY_ENUM:
             try:
                 _, rows = self.con.fetchdf(f"""
@@ -348,20 +432,22 @@ class StatsDiffer:
             dropped_categories=dropped_cats[:20],
         )
 
-    def _datetime_diff(self, col: str) -> ColumnStatsDiff:
+    def _assemble_datetime(
+        self,
+        col: str,
+        null_before: float, null_after: float,
+        card_before: int, card_after: int,
+    ) -> ColumnStatsDiff:
         """
-        Datetime columns: null rate, cardinality, min/max date shift.
+        Assemble a datetime ColumnStatsDiff with min/max bounds.
         Alerts when the min or max date shifts between source and target.
-        Uses VARCHAR cast so it works for both DATE and TIMESTAMP column types.
+        Uses VARCHAR cast so it works for both DATE and TIMESTAMP types.
         """
-        null_before, null_after = self._null_rates(col)
-        card_before, card_after = self._cardinality(col)
-
-        def _dt_bounds(view):
+        def _dt_bounds(view: str) -> tuple[str | None, str | None]:
             try:
                 row = self.con.fetchone(
-                    f'SELECT CAST(MIN("{col}") AS VARCHAR), ' 
-                    f'CAST(MAX("{col}") AS VARCHAR) ' 
+                    f'SELECT CAST(MIN("{col}") AS VARCHAR), '
+                    f'CAST(MAX("{col}") AS VARCHAR) '
                     f'FROM {view} WHERE "{col}" IS NOT NULL'
                 )
                 if row and row[0] is not None:
@@ -371,7 +457,7 @@ class StatsDiffer:
                 pass
             try:
                 row = self.con.fetchone(
-                    f'SELECT MIN("{col}"), MAX("{col}") ' 
+                    f'SELECT MIN("{col}"), MAX("{col}") '
                     f'FROM {view} WHERE "{col}" IS NOT NULL'
                 )
                 if row and row[0] is not None:
@@ -436,7 +522,7 @@ class StatsDiffer:
         if diff.kl_divergence is not None and diff.kl_divergence > 0.1:
             reasons.append(f"KL divergence = {diff.kl_divergence:.4f} (distribution shifted)")
 
-        # Merge with any reasons already set (e.g. by _datetime_diff)
+        # Merge with any reasons already set (e.g. by _assemble_datetime)
         all_reasons = list(diff.drift_reasons) + reasons
         diff.drift_reasons = all_reasons
         diff.is_drifted    = bool(all_reasons)
