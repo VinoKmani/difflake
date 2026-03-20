@@ -1078,3 +1078,266 @@ class TestBatchedStats:
                           target=str(tmp_path / "b.parquet"),
                           mode="stats").run()
         assert len(result.stats_diff.column_diffs) == 15
+
+
+# ── Validate command ────────────────────────────────────────────────────────
+
+class TestValidateCommand:
+    """Tests for `difflake validate` CLI command."""
+
+    @pytest.fixture
+    def tmp(self, tmp_path):
+        return tmp_path
+
+    @pytest.fixture
+    def data_p(self, tmp_path):
+        """Parquet file with clean data."""
+        p = tmp_path / "data.parquet"
+        write_parquet(p, {
+            "id":    [1, 2, 3, 4, 5],
+            "name":  ["Alice", "Bob", "Carol", "Dave", "Eve"],
+            "age":   [30, 25, 35, 28, 22],
+            "score": [95.5, 88.0, 72.3, 91.1, 60.0],
+        })
+        return p
+
+    @pytest.fixture
+    def dirty_p(self, tmp_path):
+        """Parquet file with nulls and duplicates."""
+        p = tmp_path / "dirty.parquet"
+        write_parquet(p, {
+            "id":   [1, 2, 2, 3],
+            "name": ["Alice", None, "Bob", "Carol"],
+            "age":  [None, 25, 25, -5],
+        })
+        return p
+
+    def cli(self):
+        from click.testing import CliRunner
+        from difflake.cli import main
+        return CliRunner(), main
+
+    # ── min-rows ──────────────────────────────────────────────────────────
+
+    def test_min_rows_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--min-rows", "3"])
+        assert res.exit_code == 0
+        assert "✅" in res.output
+
+    def test_min_rows_fails(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--min-rows", "100"])
+        assert res.exit_code == 1
+        assert "❌" in res.output
+
+    # ── max-rows ──────────────────────────────────────────────────────────
+
+    def test_max_rows_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--max-rows", "10"])
+        assert res.exit_code == 0
+
+    def test_max_rows_fails(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--max-rows", "2"])
+        assert res.exit_code == 1
+
+    # ── not-null ──────────────────────────────────────────────────────────
+
+    def test_not_null_passes_clean_data(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--not-null", "id"])
+        assert res.exit_code == 0
+        assert "no nulls" in res.output
+
+    def test_not_null_fails_when_nulls_present(self, dirty_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(dirty_p), "--not-null", "name"])
+        assert res.exit_code == 1
+        assert "❌" in res.output
+
+    def test_not_null_multiple_columns(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p),
+                           "--not-null", "id", "--not-null", "name"])
+        assert res.exit_code == 0
+
+    # ── unique ────────────────────────────────────────────────────────────
+
+    def test_unique_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--unique", "id"])
+        assert res.exit_code == 0
+        assert "all unique" in res.output
+
+    def test_unique_fails_with_duplicates(self, dirty_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(dirty_p), "--unique", "id"])
+        assert res.exit_code == 1
+        assert "duplicate" in res.output
+
+    # ── min-val / max-val ─────────────────────────────────────────────────
+
+    def test_min_val_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--min-val", "score:50"])
+        assert res.exit_code == 0
+
+    def test_min_val_fails(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--min-val", "score:99"])
+        assert res.exit_code == 1
+
+    def test_max_val_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--max-val", "score:100"])
+        assert res.exit_code == 0
+
+    def test_max_val_fails(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--max-val", "age:20"])
+        assert res.exit_code == 1
+
+    def test_min_val_negative_allowed(self, dirty_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(dirty_p), "--min-val", "age:-100"])
+        assert res.exit_code == 0
+
+    # ── column-exists ─────────────────────────────────────────────────────
+
+    def test_column_exists_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--column-exists", "id"])
+        assert res.exit_code == 0
+        assert "found" in res.output
+
+    def test_column_exists_fails(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--column-exists", "nonexistent"])
+        assert res.exit_code == 1
+        assert "missing" in res.output
+
+    # ── where-count ───────────────────────────────────────────────────────
+
+    def test_where_count_passes(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p),
+                           "--where-count", "age < 0==0"])
+        assert res.exit_code == 0
+
+    def test_where_count_fails(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p),
+                           "--where-count", "age < 0==999"])
+        assert res.exit_code == 1
+
+    # ── multiple checks ───────────────────────────────────────────────────
+
+    def test_multiple_checks_all_pass(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, [
+            "validate", str(data_p),
+            "--min-rows", "5",
+            "--max-rows", "5",
+            "--not-null", "id",
+            "--unique", "id",
+            "--column-exists", "score",
+        ])
+        assert res.exit_code == 0
+        assert "All 5 checks passed" in res.output
+
+    def test_multiple_checks_partial_fail(self, dirty_p):
+        r, m = self.cli()
+        res = r.invoke(m, [
+            "validate", str(dirty_p),
+            "--not-null", "name",   # fails
+            "--not-null", "id",     # passes (no nulls in id)
+        ])
+        assert res.exit_code == 1
+        assert "❌" in res.output
+
+    # ── --where pre-filter ────────────────────────────────────────────────
+
+    def test_where_filter_applied(self, data_p):
+        r, m = self.cli()
+        # After filtering to age >= 30, only 2 rows (Alice=30, Carol=35)
+        res = r.invoke(m, ["validate", str(data_p),
+                           "--where", "age >= 30",
+                           "--min-rows", "2",
+                           "--max-rows", "2"])
+        assert res.exit_code == 0
+
+    # ── --fail-fast ───────────────────────────────────────────────────────
+
+    def test_fail_fast_stops_early(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, [
+            "validate", str(data_p),
+            "--fail-fast",
+            "--min-rows", "1000",   # fails → stop
+            "--max-rows", "3",      # would also fail
+        ])
+        assert res.exit_code == 1
+        # Only 1 check ran because of fail_fast
+        assert "1 of 1" in res.output or "1 of" in res.output
+
+    # ── no checks ─────────────────────────────────────────────────────────
+
+    def test_no_checks_warns(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p)])
+        assert res.exit_code == 0
+        assert "No checks" in res.output
+
+    # ── YAML config integration ───────────────────────────────────────────
+
+    def test_yaml_config_checks(self, data_p, tmp_path):
+        cfg_path = tmp_path / "difflake.yaml"
+        cfg_path.write_text(
+            "validate:\n"
+            "  checks:\n"
+            "    - kind: min_rows\n"
+            "      value: 5\n"
+            "    - kind: not_null\n"
+            "      column: id\n"
+        )
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--config", str(cfg_path)])
+        assert res.exit_code == 0
+        assert "All 2 checks passed" in res.output
+
+    def test_yaml_config_failing_check(self, data_p, tmp_path):
+        cfg_path = tmp_path / "difflake.yaml"
+        cfg_path.write_text(
+            "validate:\n"
+            "  checks:\n"
+            "    - kind: min_rows\n"
+            "      value: 9999\n"
+        )
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--config", str(cfg_path)])
+        assert res.exit_code == 1
+
+    # ── CSV input ─────────────────────────────────────────────────────────
+
+    def test_validate_csv_file(self, tmp_path):
+        p = tmp_path / "data.csv"
+        p.write_text("id,name\n1,Alice\n2,Bob\n3,Carol\n")
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(p), "--min-rows", "3", "--not-null", "id"])
+        assert res.exit_code == 0
+
+    # ── error handling ────────────────────────────────────────────────────
+
+    def test_nonexistent_file_exits_1(self, tmp_path):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(tmp_path / "missing.parquet"),
+                           "--min-rows", "1"])
+        assert res.exit_code == 1
+
+    def test_singular_check_message(self, data_p):
+        r, m = self.cli()
+        res = r.invoke(m, ["validate", str(data_p), "--min-rows", "1"])
+        assert res.exit_code == 0
+        assert "1 check passed" in res.output
