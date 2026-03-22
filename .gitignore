@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# macOS
+.DS_Store
+
+# Example output (generated files, not committed)
+examples/output/
+
+# Docs build
+docs/_build/
+site/
+
+# Test data and output files
+*.pyc
+taxi_data/
+load_test_results/
+difflake_*.html
+difflake_*.json
+difflake_*.md
+
+# Release process (internal, not for contributors)
+RELEASE.md
+
+# DuckDB temp files
+*.duckdb
+*.duckdb.wal
