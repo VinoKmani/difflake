@@ -202,7 +202,7 @@ difflake show jan.parquet --tail --rows 10
 difflake show jan.parquet --freq payment_type
 
 # Top 5 highest fares
-difflake show jan.parquet --order-by fare_amount DESC --rows 5
+difflake show jan.parquet --order-by "fare_amount DESC" --rows 5
 
 # Profile only rows that match a condition
 difflake show jan.parquet --where "fare_amount > 100" --stats
