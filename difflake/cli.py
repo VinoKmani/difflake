@@ -350,7 +350,7 @@ def diff(source, target, key, mode, output, out, threshold,
 @click.option("--where", "-w", default=None,
     help='SQL WHERE filter. e.g. --where "fare_amount > 500"')
 @click.option("--order-by", "order_by", default=None,
-    help='Sort by column. e.g. --order-by fare_amount DESC')
+    help='Sort by column. e.g. --order-by "fare_amount DESC"')
 @click.option("--freq", default=None,
     help="Top-10 value frequencies for a column. e.g. --freq payment_type")
 @click.option("--format", "fmt", default=None,
@@ -371,7 +371,7 @@ def show(path, rows, show_schema, show_count, tail, show_stats,
       difflake show data.parquet --stats
       difflake show data.parquet --rows 20
       difflake show data.parquet --tail
-      difflake show data.parquet --order-by fare_amount DESC
+      difflake show data.parquet --order-by "fare_amount DESC"
       difflake show data.parquet --where "fare_amount > 500"
       difflake show data.parquet --where "passenger_count is null" --count
       difflake show data.parquet --freq payment_type
