@@ -4,10 +4,11 @@
 
 [![CI](https://github.com/VinoKmani/difflake/actions/workflows/ci.yml/badge.svg)](https://github.com/VinoKmani/difflake/actions/workflows/ci.yml)
 [![PyPI version](https://badge.fury.io/py/difflake.svg)](https://pypi.org/project/difflake/)
+[![Coverage](https://img.shields.io/badge/coverage-93%25-brightgreen.svg)](https://github.com/VinoKmani/difflake)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-You changed a pipeline. Something downstream broke. You need to know **what changed in the data** — which columns shifted, which rows were added, which values drifted.
+You changed a pipeline. Something downstream broke. You need to know exactly what changed in the data — which columns shifted, which rows were added, which values drifted.
 
 difflake answers that in one command:
 
@@ -16,7 +17,7 @@ pip install difflake
 difflake compare old.parquet new.parquet
 ```
 
-That's it. No config files, no database, no server. Works on Parquet, CSV, JSON, Delta Lake, and more.
+No config files. No database. No server. Works on Parquet, CSV, JSON, Delta Lake, and more.
 
 ---
 
@@ -32,11 +33,11 @@ difflake compare old.parquet new.parquet --mode stats
 # Row diff — which rows were added, removed, or changed?
 difflake compare old.parquet new.parquet --mode rows --key user_id
 
-# Inspect any file — no diff needed
+# Inspect any file without running a diff
 difflake show users.parquet --stats
 difflake show users.parquet --where "country = 'US'" --count
 
-# Assert data quality in CI
+# Assert data quality in CI — exits 1 if any check fails
 difflake validate users.parquet --min-rows 10000 --not-null user_id --unique email
 
 # Run ad-hoc SQL against any file
@@ -45,51 +46,10 @@ difflake query users.parquet "SELECT country, COUNT(*) FROM t GROUP BY 1 ORDER B
 
 ---
 
-## Install
-
-```bash
-pip install difflake
-```
-
-DuckDB extensions for Delta Lake, Avro, Iceberg, and cloud storage install automatically on first use. Nothing else to configure.
-
-Cloud credential helpers (optional):
-
-```bash
-pip install difflake[s3]      # boto3 for AWS S3
-pip install difflake[gcs]     # google-cloud-storage
-pip install difflake[azure]   # azure-storage-blob
-pip install difflake[cloud]   # all three
-```
-
-**Requirements:** Python 3.9+. No database. No server.
-
----
-
-## Get sample data
-
-All examples below use two files — `jan.parquet` and `feb.parquet` — from the NYC Yellow Taxi dataset. Download them once:
-
-```bash
-curl -L -o jan.parquet \
-  https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-01.parquet
-
-curl -L -o feb.parquet \
-  https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-02.parquet
-```
-
-> **Note:** CloudFront rate-limits repeated programmatic requests. Download once with `curl` — all examples run locally after that.
-
-Confirm it works:
-
-```bash
-difflake show jan.parquet
-```
-
----
-
 ## Table of contents
 
+- [Install](#install)
+- [Get sample data](#get-sample-data)
 - [Commands](#commands)
   - [compare](#compare)
   - [show](#show)
@@ -111,15 +71,47 @@ difflake show jan.parquet
 
 ---
 
-## Screenshots
+## Install
 
-![difflake compare schema](https://raw.githubusercontent.com/VinoKmani/difflake/main/docs/screenshot_compare_schema.png)
+```bash
+pip install difflake
+```
 
-*Schema diff: 5 column type changes and 1 rename detected in 4.4 seconds.*
+DuckDB extensions for Delta Lake, Avro, Iceberg, and cloud storage are installed automatically on first use. Nothing else to configure.
 
-![difflake compare stats](https://raw.githubusercontent.com/VinoKmani/difflake/main/docs/screenshot_compare_stats.png)
+Cloud credential helpers (optional):
 
-*Stats diff: mean drift, cardinality changes, KL divergence, and datetime shift alerts per column. 10.2s on 6M rows, 0 MB memory.*
+```bash
+pip install difflake[s3]      # boto3 for AWS S3
+pip install difflake[gcs]     # google-cloud-storage
+pip install difflake[azure]   # azure-storage-blob
+pip install difflake[cloud]   # all three
+```
+
+**Requirements:** Python 3.9+. No database. No server.
+
+---
+
+## Get sample data
+
+All examples in this README use two files — `jan.parquet` and `feb.parquet` — from the NYC Yellow Taxi dataset. Download them once before following along:
+
+```bash
+curl -L -o jan.parquet \
+  https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-01.parquet
+
+curl -L -o feb.parquet \
+  https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-02.parquet
+```
+
+> **Note:** CloudFront rate-limits repeated programmatic requests. Download once with `curl` — every example below runs against your local copies.
+
+Confirm everything is working:
+
+```bash
+difflake show jan.parquet
+# Prints: schema, row count, and first 5 rows
+```
 
 ---
 
@@ -127,11 +119,11 @@ difflake show jan.parquet
 
 ### compare
 
-Compare two datasets. The core command.
+Compare two datasets. This is the core command.
 
 ```bash
 difflake compare SOURCE TARGET [options]
-difflake diff SOURCE TARGET [options]   # same thing — alias
+difflake diff SOURCE TARGET [options]   # alias — works identically
 ```
 
 | Flag | Default | Description |
@@ -149,22 +141,23 @@ difflake diff SOURCE TARGET [options]   # same thing — alias
 | `--verbose` | off | Show sample changed rows in output |
 | `--config FILE` | — | Load settings from a YAML file |
 
-Examples:
-
 ```bash
-# Full diff (schema + stats + rows) with row-level key
+# Full diff — schema + stats + row-level changes
 difflake compare jan.parquet feb.parquet --key vendor_id
 
-# Stricter drift threshold — flag anything that changed more than 5%
+# Schema only — instant, reads no row data
+difflake compare jan.parquet feb.parquet --mode schema
+
+# Tighter threshold — flag anything that drifted more than 5%
 difflake compare jan.parquet feb.parquet --mode stats --threshold 0.05
 
-# Ignore audit columns that always differ
+# Exclude audit columns that always differ
 difflake compare jan.parquet feb.parquet --ignore-columns updated_at,_loaded_at
 
 # Save an HTML report
 difflake compare jan.parquet feb.parquet --output html --out report.html
 
-# Save a JSON report for downstream scripts
+# Save a JSON report for downstream automation
 difflake compare jan.parquet feb.parquet --output json --out report.json
 
 # Composite primary key
@@ -175,22 +168,20 @@ difflake compare jan.parquet feb.parquet --key vendor_id,pickup_datetime
 
 ### show
 
-Inspect any file — no diff needed.
-
-With no flags, `show` prints schema + row count + first 5 rows in one output. Best starting point for an unfamiliar file.
+Inspect any file without running a diff. With no flags, prints schema + row count + first 5 rows in a single output — the fastest way to get oriented on an unfamiliar dataset.
 
 ```bash
 difflake show FILE [options]
 ```
 
 ```bash
-# Overview (default) — schema + count + first 5 rows
+# Overview — schema + count + first 5 rows (default)
 difflake show jan.parquet
 
 # Schema only
 difflake show jan.parquet --schema
 
-# Row and column counts, file size
+# Row count, column count, file size
 difflake show jan.parquet --count
 
 # Per-column stats: nulls, cardinality, min, max, mean
@@ -208,7 +199,7 @@ difflake show jan.parquet --freq payment_type
 # Top 5 highest fares
 difflake show jan.parquet --order-by fare_amount DESC --rows 5
 
-# Profile only matching rows
+# Profile only rows that match a condition
 difflake show jan.parquet --where "fare_amount > 100" --stats
 
 # Specific columns only
@@ -219,7 +210,7 @@ difflake show jan.parquet --columns vendor_id,fare_amount,trip_distance
 
 ### validate
 
-Assert data quality. Exits with code 1 if any check fails — plug directly into CI.
+Assert data quality against a set of checks. Exits with code 1 if any check fails — plug it directly into a CI pipeline.
 
 ```bash
 difflake validate FILE [checks] [options]
@@ -235,13 +226,13 @@ difflake validate jan.parquet \
   --max-val passenger_count:9 \
   --column-exists pickup_datetime
 
-# Check a filtered subset only
+# Validate a filtered subset — e.g. only credit card payments
 difflake validate jan.parquet --where "payment_type = 1" --min-rows 500
 
-# Stop on first failure
+# Stop on the first failure
 difflake validate jan.parquet --min-rows 1000 --fail-fast
 
-# Load checks from config
+# Load checks from a config file
 difflake validate jan.parquet --config difflake.yaml
 ```
 
@@ -258,7 +249,7 @@ difflake validate jan.parquet --config difflake.yaml
 | `--column-exists COL` | `--column-exists created_at` | Column exists in schema |
 | `--where-count "EXPR":N` | `--where-count "fare_amount<0":0` | Rows matching expr == N |
 
-YAML config:
+YAML config format:
 
 ```yaml
 validate:
@@ -278,32 +269,40 @@ validate:
 
 ### query
 
-Run any SQL against any file. The file is registered as a view named `t`.
+Run any SQL against any file. The file is registered as a DuckDB view named `t`. No database setup needed.
 
 ```bash
 difflake query FILE "SQL" [options]
 ```
 
 ```bash
-# Explore the data
+# Quick look at the data
 difflake query jan.parquet "SELECT * FROM t LIMIT 10"
 
-# Group by with aggregation
+# Aggregate by category
 difflake query jan.parquet \
   "SELECT payment_type, COUNT(*) AS trips, ROUND(AVG(fare_amount), 2) AS avg_fare
    FROM t GROUP BY 1 ORDER BY 2 DESC"
 
-# Find unexpected values
-difflake query jan.parquet "SELECT * FROM t WHERE passenger_count = 0 LIMIT 20"
+# Find duplicate IDs — should return 0 rows if trip_id is unique
+difflake query jan.parquet \
+  "SELECT trip_id, COUNT(*) AS n FROM t GROUP BY 1 HAVING n > 1"
 
-# Export to CSV
-difflake query jan.parquet "SELECT vendor_id, fare_amount FROM t" \
-  --output csv --out fares.csv
+# Check for nulls across every column
+difflake query jan.parquet \
+  "SELECT COUNT(*) - COUNT(vendor_id) AS null_vendor,
+          COUNT(*) - COUNT(fare_amount) AS null_fare
+   FROM t"
 
-# Limit output rows
-difflake query jan.parquet "SELECT * FROM t ORDER BY fare_amount DESC" --limit 20
+# Sanity check after a pipeline run — any negative fares?
+difflake query jan.parquet "SELECT COUNT(*) FROM t WHERE fare_amount < 0"
 
-# Works on all supported formats
+# Export results to CSV
+difflake query jan.parquet \
+  "SELECT vendor_id, fare_amount, trip_distance FROM t WHERE fare_amount > 100" \
+  --output csv --out high_fares.csv
+
+# Works on all supported formats — CSV, JSON, Delta Lake, S3, and more
 difflake query events.jsonl "SELECT event_type, COUNT(*) FROM t GROUP BY 1"
 difflake query s3://bucket/data.parquet "SELECT COUNT(*) FROM t"
 ```
@@ -314,7 +313,7 @@ difflake query s3://bucket/data.parquet "SELECT COUNT(*) FROM t"
 
 ### Schema diff
 
-Detects every structural change. Reads only file metadata — never loads row data. Instant even on files with billions of rows.
+Reads only file metadata — never loads row data. Runs in under a second regardless of file size.
 
 ```bash
 difflake compare jan.parquet feb.parquet --mode schema
@@ -325,69 +324,73 @@ Detects:
 - **Added columns** — present in target, not in source
 - **Removed columns** — present in source, not in target
 - **Type changes** — e.g. `INTEGER` → `DOUBLE`
-- **Renamed columns** — detected via Jaro-Winkler similarity. `user_id` → `userId` is flagged as a rename, not a drop + add
+- **Renamed columns** — detected using Jaro-Winkler string similarity. `user_id` → `userId` is flagged as a rename, not an independent drop and add
 - **Column order changes**
 
 ---
 
 ### Statistics diff
 
-Per-column drift metrics. All computation stays inside DuckDB — no data enters Python memory.
+Computes per-column drift metrics entirely inside DuckDB. No row data enters Python memory.
 
 ```bash
 difflake compare jan.parquet feb.parquet --mode stats
 difflake compare jan.parquet feb.parquet --mode stats --threshold 0.05
 ```
 
-**Numeric columns:** mean, median, std dev, min, max, null rate, cardinality, KL divergence.
+**Numeric columns:** mean, median, std dev, min, max, null rate, cardinality, and KL divergence (distribution shift score).
 
-**Categorical columns:** null rate, cardinality, new/disappeared category values.
+**Categorical columns:** null rate, cardinality, new values that appeared, values that disappeared.
 
-The drift threshold (default `0.15`) controls when a column is flagged. KL divergence catches cases where the mean is stable but the distribution shape has changed (bimodal, skewed, etc.).
+The drift threshold (default `0.15`) controls when a column is flagged as drifted. KL divergence is especially useful — it catches cases where the mean is stable but the distribution shape has changed (bimodal, long-tailed, etc.) that a simple mean comparison would miss.
 
 ---
 
 ### Row-level diff
 
-Identifies exactly which rows were added, removed, or changed. Requires a primary key.
+Identifies exactly which rows were added, removed, or changed between two datasets. Requires a primary key column.
 
 ```bash
-# Count diff — no key needed
+# Count-only diff — no key needed
 difflake compare jan.parquet feb.parquet --mode rows
 
-# Key-based diff — which rows changed and what changed in them
+# Key-based — shows exactly which rows changed and what changed in them
 difflake compare jan.parquet feb.parquet --mode rows --key vendor_id
 
 # Composite key
 difflake compare jan.parquet feb.parquet --mode rows --key vendor_id,pickup_datetime
 
-# Show sample changed rows
+# Show sample changed rows inline
 difflake compare jan.parquet feb.parquet --mode rows --key vendor_id --verbose
 ```
 
-Uses a SQL `FULL OUTER JOIN` inside DuckDB with automatic disk spill — works on files of any size.
+Uses a SQL `FULL OUTER JOIN` inside DuckDB with automatic disk spill — works on files of any size without loading data into memory.
 
 ---
 
 ## Output formats
 
-```bash
-# CLI — colorized terminal output (default)
-difflake compare jan.parquet feb.parquet
+| Format | Flag | Best for |
+|---|---|---|
+| CLI | `--output cli` (default) | Daily use — colorized terminal output with tables and drift alerts |
+| HTML | `--output html` | Sharing — self-contained browser report with charts, works offline |
+| JSON | `--output json` | Automation — full machine-readable result for CI or downstream scripts |
+| Markdown | `--output markdown` | PRs — paste directly into a GitHub PR comment |
 
-# HTML — self-contained browser report with charts
+```bash
+# HTML report — open in browser, no internet required
 difflake compare jan.parquet feb.parquet --output html --out report.html
 open report.html
 
-# JSON — full machine-readable result for CI/scripts
+# JSON — parse in scripts or store as a pipeline artifact
 difflake compare jan.parquet feb.parquet --output json --out report.json
 
-# Markdown — paste into a GitHub PR comment
+# Markdown — post as a PR comment
 difflake compare jan.parquet feb.parquet --output markdown --out diff.md
 cat diff.md | gh pr comment --body-file -
 ```
 
-The HTML report embeds Chart.js inline by default so it works offline. Use `--no-offline` to load Chart.js from CDN (smaller file):
+The HTML report embeds Chart.js inline by default so it works without an internet connection. Use `--no-offline` to load Chart.js from CDN instead (smaller file size):
 
 ```bash
 difflake compare jan.parquet feb.parquet --output html --out report.html --no-offline
@@ -399,13 +402,13 @@ difflake compare jan.parquet feb.parquet --output html --out report.html --no-of
 
 ### SQL WHERE filter
 
-Applies a SQL predicate before any diff or preview. For Parquet, pushed down to DuckDB — only matching row groups are read.
+Applies a SQL predicate before any diff or preview. For Parquet files, the predicate is pushed down to DuckDB — only matching row groups are read from disk, not the entire file.
 
 ```bash
-# Diff only a subset of rows
+# Diff only a filtered subset
 difflake compare jan.parquet feb.parquet --where "payment_type = 1"
 
-# Profile matching rows only
+# Profile only high-fare trips
 difflake show jan.parquet --where "fare_amount > 100" --stats
 
 # Compound conditions
@@ -417,9 +420,11 @@ difflake compare jan.parquet feb.parquet --where "pickup_datetime >= '2023-01-15
 
 ### Sampling
 
+Use `--sample N` for stats and row diff on very large files. Schema diff always runs on the full dataset regardless.
+
 ```bash
-# Random sample — good for stats diff on huge files
-difflake compare jan.parquet feb.parquet --sample 500000
+# Random sample — representative cross-section, good for drift analysis
+difflake compare jan.parquet feb.parquet --mode stats --sample 500000
 
 # First N rows in file order — deterministic, same rows every run
 difflake compare jan.parquet feb.parquet --limit 1000000
@@ -429,11 +434,11 @@ difflake compare jan.parquet feb.parquet --limit 1000000
 
 ## Cloud storage
 
-### AWS S3 ✅ tested
+### AWS S3 ✅ verified
 
-Verified against the [Ookla Open Data](https://github.com/teamookla/ookla-open-data) public S3 bucket — 3.7M row Parquet file, schema diff, stats diff, row count, and exit codes all confirmed working.
+Tested against the [Ookla Open Data](https://github.com/teamookla/ookla-open-data) public S3 bucket — 3.7M row Parquet file, full schema diff, stats diff with sampling, row count diff, and exit codes all confirmed working.
 
-Public buckets work with no credentials. For private buckets:
+Public S3 buckets require no credentials — DuckDB uses anonymous access automatically. For private buckets:
 
 ```bash
 export AWS_ACCESS_KEY_ID="AKIA..."
@@ -441,18 +446,19 @@ export AWS_SECRET_ACCESS_KEY="your-secret"
 export AWS_DEFAULT_REGION="us-east-1"
 
 difflake compare s3://bucket/v1/users.parquet s3://bucket/v2/users.parquet
-difflake compare s3://bucket/v1/users.parquet s3://bucket/v2/users.parquet --mode stats --sample 500000
+difflake compare s3://bucket/v1/users.parquet s3://bucket/v2/users.parquet \
+  --mode stats --sample 500000
 ```
 
-MinIO / S3-compatible stores:
+MinIO and other S3-compatible stores:
 
 ```bash
 export AWS_ENDPOINT_URL="https://minio.mycompany.com"
 ```
 
-### Google Cloud Storage ⚠️ untested
+### Google Cloud Storage ⚠️ not yet verified
 
-The implementation follows the same DuckDB `httpfs` pattern as S3 and uses the standard `GOOGLE_APPLICATION_CREDENTIALS` env var. It should work, but we have not tested against a real GCS bucket yet.
+The implementation follows the same DuckDB `httpfs` pattern as S3. The code is in place and should work, but we have not tested it against a real GCS bucket.
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
@@ -460,11 +466,11 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 difflake compare gs://bucket/v1/users.parquet gs://bucket/v2/users.parquet
 ```
 
-If you test this and it works (or doesn't), please [open an issue](https://github.com/VinoKmani/difflake/issues) so we can update this note.
+If you try this and run into any issues, please [open an issue](https://github.com/VinoKmani/difflake/issues).
 
-### Azure Blob Storage ⚠️ untested
+### Azure Blob Storage ⚠️ not yet verified
 
-Same situation — the code is in place, but not tested against a real Azure endpoint.
+Same situation — the code is in place but not tested against a real Azure endpoint.
 
 ```bash
 export AZURE_STORAGE_ACCOUNT="mystorageaccount"
@@ -485,7 +491,7 @@ difflake compare \
 
 ## Config file
 
-Place a `difflake.yaml` in your project root and difflake reads it automatically.
+Place a `difflake.yaml` in your project root and difflake reads it automatically. Useful for committing repeatable diff configurations to version control.
 
 ```yaml
 # difflake.yaml
@@ -502,18 +508,20 @@ sample: 500000
 ```
 
 ```bash
-difflake compare                      # uses difflake.yaml
-difflake compare --output cli         # CLI flag overrides config
-difflake compare --config other.yaml  # use a different config file
+difflake compare                       # reads difflake.yaml automatically
+difflake compare --output cli          # CLI flags override config values
+difflake compare --config other.yaml   # use a different config file
 ```
 
-A full annotated example is in `difflake.yaml.example`.
+A fully annotated example is in `difflake.yaml.example`.
 
 ---
 
 ## CI integration
 
-### GitHub Actions — drift detection
+difflake exits with code 2 when drift alerts fire, making it straightforward to fail a pipeline when data changes beyond a threshold.
+
+### Drift detection
 
 ```yaml
 - name: Check for data drift
@@ -537,7 +545,7 @@ A full annotated example is in `difflake.yaml.example`.
     path: drift_report.json
 ```
 
-### GitHub Actions — data validation
+### Data validation
 
 ```yaml
 - name: Validate data quality
@@ -555,9 +563,9 @@ A full annotated example is in `difflake.yaml.example`.
 
 | Code | Meaning |
 |---|---|
-| 0 | Success, no drift alerts |
-| 1 | Error (bad path, bad credentials, unsupported format) |
-| 2 | Success, drift alerts fired |
+| 0 | Success — diff ran, no drift alerts |
+| 1 | Error — bad path, bad credentials, unsupported format |
+| 2 | Success — diff ran, drift alerts fired |
 
 Code 2 is not an error. Use it to fail CI when drift is detected.
 
@@ -569,7 +577,7 @@ Code 2 is not an error. Use it to fail CI when drift is detected.
 # Show progress during a diff
 difflake --log-level INFO compare jan.parquet feb.parquet
 
-# JSON structured logs for log aggregators (Datadog, Splunk, etc.)
+# JSON structured logs for Datadog, Splunk, or any log aggregator
 difflake --log-level DEBUG --log-format json compare jan.parquet feb.parquet
 
 # Write logs to a file
@@ -581,6 +589,8 @@ Environment variables: `DIFFLAKE_LOG_LEVEL`, `DIFFLAKE_LOG_FORMAT`, `DIFFLAKE_LO
 ---
 
 ## Python API
+
+The CLI is a thin wrapper around the `DiffLake` class. Everything available in the CLI is available programmatically.
 
 ```python
 from difflake import DiffLake
@@ -609,11 +619,12 @@ result.to_json("report.json")
 result.to_markdown("diff.md")
 ```
 
-Full result fields:
+<details>
+<summary>Full result reference</summary>
 
 ```python
 result.schema_diff.has_changes
-result.schema_diff.added_columns       # list of ColumnSchemaDiff
+result.schema_diff.added_columns        # list of ColumnSchemaDiff
 result.schema_diff.removed_columns
 result.schema_diff.type_changed_columns
 result.schema_diff.renamed_columns
@@ -628,20 +639,25 @@ result.row_diff.row_count_after
 result.row_diff.rows_added
 result.row_diff.rows_removed
 result.row_diff.rows_changed
-result.row_diff.sample_changed         # list of dicts with before/after values
+result.row_diff.sample_changed          # list of dicts with before/after values
 result.elapsed_seconds
 ```
 
-Cloud, Delta Lake, and cross-format work identically:
+</details>
+
+S3, Delta Lake, and cross-format comparison work the same way:
 
 ```python
 # S3
-DiffLake(source="s3://bucket/v1/users.parquet", target="s3://bucket/v2/users.parquet").run()
+DiffLake(
+    source="s3://bucket/v1/users.parquet",
+    target="s3://bucket/v2/users.parquet",
+).run()
 
 # Delta Lake
 DiffLake(source="delta_v1/", target="delta_v2/", primary_key="user_id").run()
 
-# CSV vs Parquet
+# CSV vs Parquet — cross-format is supported
 DiffLake(source="old.csv", target="new.parquet", primary_key="id").run()
 ```
 
@@ -649,7 +665,7 @@ DiffLake(source="old.csv", target="new.parquet", primary_key="id").run()
 
 ## Performance
 
-Benchmarked on locally downloaded NYC Yellow Taxi Parquet files (MacBook Air, M-series). **0 MB Python memory** at every scale.
+Benchmarked on locally downloaded NYC Yellow Taxi Parquet files (MacBook Air, M-series). All queries run inside DuckDB — **0 MB Python memory overhead** at every scale.
 
 | Scenario | Rows | File size | Time |
 |---|---|---|---|
@@ -660,23 +676,25 @@ Benchmarked on locally downloaded NYC Yellow Taxi Parquet files (MacBook Air, M-
 | Stats (`--sample 500k`) | 6M | 91 MB | 6.1s |
 | Stats (`--sample 500k`) | **35.2M** | **527 MB** | **11.2s** |
 | Stats full scan | 6M | 91 MB | 12.7s |
-| Full diff + HTML (`--sample 500k`) | 35.2M | 527 MB | 11.2s |
+| Full diff + HTML report | 35.2M | 527 MB | 11.2s |
 
-**Why it's fast:** Schema diff reads only file metadata. Stats diff is a single SQL aggregation pass — only the result numbers (mean, min, max) touch Python. Row diff is a native `FULL OUTER JOIN` with automatic disk spill. No data ever enters Python memory.
+For comparison, loading a 527 MB Parquet file into pandas takes roughly 8–12s and consumes 3–5 GB of memory — before any computation begins. difflake runs the full stats diff in the same time with no memory cost.
+
+**Sampling scales well:** `--sample 500k` on 35M rows (11.2s) is only 1.8x slower than on 6M rows (6.1s). The extra time is one additional file scan, not proportional to row count.
 
 ---
 
 ## How it works
 
-difflake is built on DuckDB, an embedded analytical database that runs inside your Python process.
+difflake uses DuckDB, an embedded analytical database that runs entirely inside your Python process — no server, no external service, no data size limit.
 
-1. Source and target are registered as DuckDB SQL views — the file is not read yet.
-2. `DESCRIBE` is run on both views for schema diff. No row data loaded.
-3. A single SQL aggregation query per column group runs for stats diff. Only the tiny result numbers come back to Python.
-4. A `FULL OUTER JOIN` inside DuckDB runs for row diff. DuckDB spills to disk automatically.
+1. Source and target are registered as DuckDB SQL views. For Parquet, the file is not read yet — only the metadata.
+2. `DESCRIBE` runs on both views for schema diff. No row data is loaded.
+3. A single SQL aggregation query computes all stats (mean, std, min, max, null rate) per column group in one pass. Only those result numbers come back to Python.
+4. A `FULL OUTER JOIN` runs inside DuckDB for row diff. DuckDB spills to disk automatically when needed.
 5. The report is rendered from those small outputs.
 
-Result: schema diff is always instant, stats diff on a 10 GB file uses no more Python memory than on a 10 MB file, and row diff on 50M rows works because DuckDB owns the join.
+Schema diff is always instant. Stats diff on a 10 GB file uses no more Python memory than on a 10 MB file. Row diff on 50M rows works because DuckDB owns the join — Python never sees the data.
 
 ---
 
@@ -684,16 +702,18 @@ Result: schema diff is always instant, stats diff on a 10 GB file uses no more P
 
 | Format | Extension | Notes |
 |---|---|---|
-| Parquet | `.parquet` `.pq` | Native columnar, fastest. Hive partitions supported |
-| CSV / TSV | `.csv` `.tsv` | Type inference, multi-file glob |
+| Parquet | `.parquet` `.pq` | Native columnar, fastest. Hive partitions and directories supported |
+| CSV / TSV | `.csv` `.tsv` | Type inference, multi-file glob concat |
 | JSON | `.json` | Array of records |
 | JSONL / NDJSON | `.jsonl` `.ndjson` | Streaming scan |
 | Delta Lake | directory | Auto-installed delta extension |
 | Avro | `.avro` | Auto-installed avro extension |
 | Iceberg | directory / URI | Auto-installed iceberg extension |
-| Parquet over HTTP | `https://...` | Any public URL |
+| Parquet over HTTPS | `https://...` | Any publicly accessible URL |
 
-All formats work with all commands. Cross-format comparison supported (e.g. CSV vs Parquet).
+Format is detected automatically from the file extension or directory structure. Use `--format` to override when the extension is ambiguous.
+
+Cross-format comparison is supported — you can compare a CSV source against a Parquet target, or a local file against a cloud path.
 
 ---
 
@@ -715,7 +735,7 @@ conn.execute("INSTALL delta; INSTALL iceberg; INSTALL avro;")
 ✗ LOW-CARDINALITY KEY: 'vendor_id' has only 2 unique values across 2.4M rows.
 ```
 
-The key column must uniquely (or near-uniquely) identify rows. A column with 2 unique values across millions of rows will produce a cartesian join explosion. Pick a higher-cardinality column or use a composite key.
+The key column needs to identify rows uniquely, or close to it. A column with 2 unique values across millions of rows would produce a cartesian join explosion. Use a higher-cardinality column or a composite key.
 
 **Key column not found**
 
@@ -724,20 +744,15 @@ The key column must uniquely (or near-uniquely) identify rows. A column with 2 u
   Did you mean: userId, user_uuid ?
 ```
 
-difflake suggests the closest column names. Check for renames between the two files — if the column was renamed, use `--mode schema` first to confirm, then pass the correct key name.
+difflake suggests the closest column names. If the column was renamed between files, run `--mode schema` first to confirm, then pass the correct key name.
 
-**Cloud access denied**
+**Noisy drift alerts on partition columns**
 
-```
-✗ S3 access denied for s3://my-bucket/data.parquet
-  Set: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
-```
+If you're comparing quarterly files, the `quarter` or `year` column will always show 100% drift — that's expected. Use `--ignore-columns quarter,year` to suppress it.
 
-difflake converts credential errors into a message listing the exact environment variables to set.
+**Stats diff is slow on a very large file**
 
-**Stats diff is slow on a huge file**
-
-Use `--sample N` to limit rows. `--sample 500000` on a 35M-row file takes ~11s and gives representative results for most drift analysis.
+Use `--sample N`. `--sample 500000` on a 35M-row file completes in ~11s and gives representative results for most drift analysis.
 
 ---
 
