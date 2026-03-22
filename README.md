@@ -221,24 +221,26 @@ Assert data quality against a set of checks. Exits with code 1 if any check fail
 difflake validate FILE [checks] [options]
 ```
 
-```bash
-# Multiple checks in one command
-difflake validate jan.parquet \
-  --min-rows 1000 \
-  --not-null VendorID \
-  --unique trip_id \
-  --min-val fare_amount:0 \
-  --max-val passenger_count:9 \
-  --column-exists pickup_datetime
+Using `users_v1.jsonl` from the [Get sample data](#get-sample-data) section:
 
-# Validate a filtered subset — e.g. only credit card payments
-difflake validate jan.parquet --where "payment_type = 1" --min-rows 500
+```bash
+# Multiple checks in one command — all pass on users_v1.jsonl
+difflake validate users_v1.jsonl \
+  --min-rows 100 \
+  --not-null user_id \
+  --unique user_id \
+  --min-val score:0 \
+  --max-val score:100 \
+  --column-exists status
+
+# Validate a filtered subset — e.g. only active users
+difflake validate users_v1.jsonl --where "status = 'active'" --min-rows 100
 
 # Stop on the first failure
-difflake validate jan.parquet --min-rows 1000 --fail-fast
+difflake validate users_v1.jsonl --min-rows 100 --fail-fast
 
 # Load checks from a config file
-difflake validate jan.parquet --config difflake.yaml
+difflake validate users_v1.jsonl --config difflake.yaml
 ```
 
 **Available checks:**
@@ -249,10 +251,10 @@ difflake validate jan.parquet --config difflake.yaml
 | `--max-rows N` | `--max-rows 1000000` | At most N rows |
 | `--not-null COL` | `--not-null user_id` | No nulls in column |
 | `--unique COL` | `--unique order_id` | All values are unique |
-| `--min-val COL:N` | `--min-val fare_amount:0` | All values >= N |
+| `--min-val COL:N` | `--min-val score:0` | All values >= N |
 | `--max-val COL:N` | `--max-val age:120` | All values <= N |
 | `--column-exists COL` | `--column-exists created_at` | Column exists in schema |
-| `--where-count "EXPR":N` | `--where-count "fare_amount<0":0` | Rows matching expr == N |
+| `--where-count "EXPR":N` | `--where-count "score<0":0` | Rows matching expr == N |
 
 YAML config format:
 
@@ -266,7 +268,7 @@ validate:
     - kind: unique
       column: order_id
     - kind: where_count
-      expr: "fare_amount < 0"
+      expr: "score < 0"
       value: 0
 ```
 
@@ -289,9 +291,9 @@ difflake query jan.parquet \
   "SELECT payment_type, COUNT(*) AS trips, ROUND(AVG(fare_amount), 2) AS avg_fare
    FROM t GROUP BY 1 ORDER BY 2 DESC"
 
-# Find duplicate IDs — should return 0 rows if trip_id is unique
-difflake query jan.parquet \
-  "SELECT trip_id, COUNT(*) AS n FROM t GROUP BY 1 HAVING n > 1"
+# Find duplicate IDs — should return 0 rows if user_id is unique
+difflake query users_v1.jsonl \
+  "SELECT user_id, COUNT(*) AS n FROM t GROUP BY 1 HAVING n > 1"
 
 # Check for nulls across every column
 difflake query jan.parquet \
