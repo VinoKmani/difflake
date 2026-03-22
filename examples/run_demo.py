@@ -122,10 +122,10 @@ def main():
 
     # ── Run diff ─────────────────────────────────────────────────────────────
     print("\n🔍 Running diff...")
-    from difflake import LakeDiff
+    from difflake import DiffLake
     from difflake.reporters.cli_reporter import CliReporter
 
-    result = LakeDiff(
+    result = DiffLake(
         source=src,
         target=tgt,
         primary_key="user_id",

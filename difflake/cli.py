@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from difflake.core import LakeDiff
+from difflake.core import DiffLake
 
 console     = Console()
 err_console = Console(stderr=True, style="red")
@@ -194,7 +194,7 @@ def _compare_command(source, target, key, mode, output, out, threshold,
         from rich.status import Status
         msg = f"Diffing [cyan]{Path(source).name}[/cyan] vs [cyan]{Path(target).name}[/cyan]..."
         with Status(msg, console=console, spinner="dots"):
-            result = LakeDiff(
+            result = DiffLake(
                 source=source,
                 target=target,
                 primary_key=key,

@@ -2,7 +2,7 @@
 Test suite for difflake — DuckDB backend.
 
 All tests use DuckDB-native APIs. No Polars dependency.
-Data is written to temp files via DuckDB and read back through LakeDiff.
+Data is written to temp files via DuckDB and read back through DiffLake.
 
 Classes:
   TestSchemaDiffer  — schema change detection
@@ -22,7 +22,7 @@ import csv, json, os, tempfile
 from pathlib import Path
 import pytest, duckdb
 
-from difflake.core import LakeDiff
+from difflake.core import DiffLake
 from difflake.models import ChangeType, DiffResult
 from difflake.connection import DuckDBConnection, _detect_format, _read_sql
 from difflake.differ.schema_differ import SchemaDiffer
@@ -178,7 +178,7 @@ class TestSchemaDiffer:
         assert "added" in diff.summary().lower(); con.close()
 
     def test_schema_mode_no_stats(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="schema").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="schema").run()
         assert result.schema_diff.has_changes
         assert result.stats_diff.column_diffs == []
 
@@ -197,35 +197,35 @@ class TestSchemaDiffer:
 
 class TestStatsDiffer:
     def test_no_drift_identical(self, base_p):
-        result = LakeDiff(source=str(base_p), target=str(base_p), mode="stats").run()
+        result = DiffLake(source=str(base_p), target=str(base_p), mode="stats").run()
         assert not result.stats_diff.has_drift
 
     def test_mean_drift_detected(self, tmp):
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, BASE)
         write_parquet(tgt, {**BASE, "revenue": [v*2 for v in BASE["revenue"]]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats", drift_threshold=0.15).run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats", drift_threshold=0.15).run()
         assert "revenue" in result.stats_diff.drifted_columns
 
     def test_null_rate_drift_detected(self, tmp):
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, BASE)
         write_parquet(tgt, {**BASE, "age": [None,None,None,28,42]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats", drift_threshold=0.10).run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats", drift_threshold=0.10).run()
         assert "age" in result.stats_diff.drifted_columns
 
     def test_new_category_detected(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="stats", drift_threshold=0.99).run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="stats", drift_threshold=0.99).run()
         status = next(d for d in result.stats_diff.column_diffs if d.column=="status")
         assert "suspended" in status.new_categories
 
     def test_cardinality_increases(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="stats").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="stats").run()
         country = next(d for d in result.stats_diff.column_diffs if d.column=="country")
         assert country.cardinality_after > country.cardinality_before
 
     def test_column_subset(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="stats", columns=["age","revenue"]).run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="stats", columns=["age","revenue"]).run()
         cols = [d.column for d in result.stats_diff.column_diffs]
         assert "age" in cols and "revenue" in cols and "country" not in cols
 
@@ -233,12 +233,12 @@ class TestStatsDiffer:
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, {"v": list(range(1, 101))})
         write_parquet(tgt, {"v": [x*10 for x in range(1, 101)]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats").run()
         v = next(d for d in result.stats_diff.column_diffs if d.column=="v")
         assert v.kl_divergence is not None and v.kl_divergence > 0.1
 
     def test_min_max_mean_populated(self, base_p):
-        result = LakeDiff(source=str(base_p), target=str(base_p), mode="stats").run()
+        result = DiffLake(source=str(base_p), target=str(base_p), mode="stats").run()
         rev = next(d for d in result.stats_diff.column_diffs if d.column=="revenue")
         assert rev.min_before is not None
         assert rev.max_before is not None
@@ -251,13 +251,13 @@ class TestStatsDiffer:
 
 class TestRowDiffer:
     def test_count_only_no_key(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="rows").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="rows").run()
         assert result.row_diff.row_count_before == 5
         assert result.row_diff.row_count_after == 7
         assert not result.row_diff.key_based_diff
 
     def test_added_rows(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_id").run()
         assert result.row_diff.rows_added == 2
         assert result.row_diff.rows_removed == 0
         assert result.row_diff.key_based_diff
@@ -266,30 +266,30 @@ class TestRowDiffer:
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, BASE)
         write_parquet(tgt, {k: v[2:] for k,v in BASE.items()})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
         assert result.row_diff.rows_removed == 2
 
     def test_changed_rows(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_id").run()
         assert result.row_diff.rows_changed >= 2
 
     def test_sample_added_populated(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_id").run()
         assert len(result.row_diff.sample_added) > 0
 
     def test_delta_pct(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="rows").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="rows").run()
         assert abs(result.row_diff.row_count_delta_pct - 40.0) < 0.1
 
     def test_null_aware_detection(self, tmp):
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, {**BASE, "status": [None,"active","inactive","active","active"]})
         write_parquet(tgt, BASE)
-        result = LakeDiff(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
         assert result.row_diff.rows_changed >= 1
 
     def test_identical_no_changes(self, base_p):
-        result = LakeDiff(source=str(base_p), target=str(base_p), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(base_p), target=str(base_p), mode="rows", primary_key="user_id").run()
         assert result.row_diff.rows_changed == 0
         assert result.row_diff.rows_added == 0
 
@@ -300,13 +300,13 @@ class TestRowDiffer:
 
 class TestKeyErrors:
     def test_missing_key_falls_back(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="rows", primary_key="no_such_col").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="rows", primary_key="no_such_col").run()
         assert not result.row_diff.key_based_diff
         assert result.row_diff.key_error is not None
         assert "no_such_col" in result.row_diff.key_error
 
     def test_missing_key_suggests_alternatives(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_Id").run()
+        result = DiffLake(source=str(base_p), target=str(evol_p), mode="rows", primary_key="user_Id").run()
         assert not result.row_diff.key_based_diff
         assert "user_id" in result.row_diff.key_error
 
@@ -316,7 +316,7 @@ class TestKeyErrors:
         tgt_data = {k: v for k,v in BASE.items() if k != "user_id"}
         tgt_data["user_uuid"] = ["a","b","c","d","e"]
         write_parquet(tgt, tgt_data)
-        result = LakeDiff(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
         assert not result.row_diff.key_based_diff
         assert result.row_diff.key_error is not None
 
@@ -324,7 +324,7 @@ class TestKeyErrors:
         src = tmp/"src.parquet"
         # 2 unique values across 500 rows = 0.4% uniqueness ratio — below 1% threshold
         write_parquet(src, {"VendorID": [1,2]*250, "fare": [10.0]*500})
-        result = LakeDiff(source=str(src), target=str(src), mode="rows", primary_key="VendorID").run()
+        result = DiffLake(source=str(src), target=str(src), mode="rows", primary_key="VendorID").run()
         assert not result.row_diff.key_based_diff
         assert result.row_diff.key_error is not None
         assert "LOW-CARDINALITY" in result.row_diff.key_error
@@ -342,19 +342,19 @@ class TestCompositeKey:
     def test_parse_strips(self):   assert _parse_key("a, b , c") == ["a","b","c"]
 
     def test_composite_added_removed(self, comp1_p, comp2_p):
-        result = LakeDiff(source=str(comp1_p), target=str(comp2_p), mode="rows",
+        result = DiffLake(source=str(comp1_p), target=str(comp2_p), mode="rows",
                           primary_key="tenant_id,order_id,event_date").run()
         assert result.row_diff.key_based_diff
         assert result.row_diff.rows_added >= 1
         assert result.row_diff.rows_removed >= 1
 
     def test_composite_changed(self, comp1_p, comp2_p):
-        result = LakeDiff(source=str(comp1_p), target=str(comp2_p), mode="rows",
+        result = DiffLake(source=str(comp1_p), target=str(comp2_p), mode="rows",
                           primary_key="tenant_id,order_id,event_date").run()
         assert result.row_diff.rows_changed >= 1
 
     def test_composite_key_string(self, comp1_p, comp2_p):
-        result = LakeDiff(source=str(comp1_p), target=str(comp2_p), mode="rows",
+        result = DiffLake(source=str(comp1_p), target=str(comp2_p), mode="rows",
                           primary_key=["tenant_id","order_id","event_date"]).run()
         assert "tenant_id" in result.row_diff.primary_key_used
 
@@ -366,7 +366,7 @@ class TestCompositeKey:
 class TestWhereFilter:
     def test_where_reduces_rows(self, tmp):
         src = tmp/"src.parquet"; write_parquet(src, BASE)
-        result = LakeDiff(source=str(src), target=str(src), mode="stats",
+        result = DiffLake(source=str(src), target=str(src), mode="stats",
                           where="revenue > 200").run()
         rev = next((d for d in result.stats_diff.column_diffs if d.column == "revenue"), None)
         assert rev is not None and rev.cardinality_before == 2  # 300 and 250
@@ -375,13 +375,13 @@ class TestWhereFilter:
         src = tmp/"src.parquet"
         write_parquet(src, {**BASE, "age": [None,None,35,28,42]})
         # Should not crash
-        result = LakeDiff(source=str(src), target=str(src), mode="schema",
+        result = DiffLake(source=str(src), target=str(src), mode="schema",
                           where="age IS NULL").run()
         assert result is not None
 
     def test_where_compound(self, tmp):
         src = tmp/"src.parquet"; write_parquet(src, BASE)
-        result = LakeDiff(source=str(src), target=str(src), mode="stats",
+        result = DiffLake(source=str(src), target=str(src), mode="stats",
                           where="status = \'active\' AND revenue > 150").run()
         # Bob(200,active), Dave(300,active), Eve(250,active) = 3
         name_d = next((d for d in result.stats_diff.column_diffs if d.column == "name"), None)
@@ -391,7 +391,7 @@ class TestWhereFilter:
         for ext, writer in [(".csv",write_csv), (".json",write_json), (".ndjson",write_ndjson)]:
             src = tmp/f"src{ext}"
             writer(src, BASE)
-            result = LakeDiff(source=str(src), target=str(src), mode="stats",
+            result = DiffLake(source=str(src), target=str(src), mode="stats",
                               where="revenue > 100").run()
             assert result.row_diff.row_count_before >= 1
 
@@ -404,13 +404,13 @@ class TestEdgeCases:
     def test_empty_files(self, tmp):
         src = tmp/"src.parquet"
         write_parquet(src, {"id":[],"val":[]})
-        result = LakeDiff(source=str(src), target=str(src), mode="rows").run()
+        result = DiffLake(source=str(src), target=str(src), mode="rows").run()
         assert result.row_diff.row_count_before == 0
 
     def test_single_row(self, tmp):
         src = tmp/"src.parquet"
         write_parquet(src, {"id":[1],"name":["Alice"]})
-        result = LakeDiff(source=str(src), target=str(src), mode="rows", primary_key="id").run()
+        result = DiffLake(source=str(src), target=str(src), mode="rows", primary_key="id").run()
         assert result.row_diff.rows_unchanged == 1
         assert result.row_diff.rows_changed == 0
 
@@ -418,32 +418,32 @@ class TestEdgeCases:
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, BASE)
         write_parquet(tgt, {"user_id":[],"name":[],"age":[],"revenue":[],"country":[],"status":[]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
         assert result.row_diff.rows_removed == 5
 
     def test_all_rows_added(self, tmp):
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, {"user_id":[],"name":[],"age":[],"revenue":[],"country":[],"status":[]})
         write_parquet(tgt, BASE)
-        result = LakeDiff(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="rows", primary_key="user_id").run()
         assert result.row_diff.rows_added == 5
 
     def test_all_null_column_no_crash(self, tmp):
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, {"id":[1,2,3],"val":[1.0,2.0,3.0]})
         write_parquet(tgt, {"id":[1,2,3],"val":[None,None,None]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats").run()
         assert isinstance(result.stats_diff.column_diffs, list)
 
     def test_missing_file_raises(self, tmp):
         good = tmp/"good.parquet"; write_parquet(good, BASE)
         with pytest.raises(Exception):
-            LakeDiff(source=str(good), target="/no/such/file.parquet").run()
+            DiffLake(source=str(good), target="/no/such/file.parquet").run()
 
     def test_unknown_extension(self, tmp):
         bad = tmp/"data.xyz"; bad.write_text("junk")
         with pytest.raises(Exception):
-            LakeDiff(source=str(bad), target=str(bad)).run()
+            DiffLake(source=str(bad), target=str(bad)).run()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -455,7 +455,7 @@ class TestIntegration:
     def test_full_diff_all_formats(self, tmp, fmt):
         src = tmp/f"src.{fmt}"; tgt = tmp/f"tgt.{fmt}"
         write_file(src, BASE); write_file(tgt, EVOLVED)
-        result = LakeDiff(source=str(src), target=str(tgt), primary_key="user_id",
+        result = DiffLake(source=str(src), target=str(tgt), primary_key="user_id",
                           drift_threshold=0.10).run()
         assert isinstance(result, DiffResult)
         assert result.row_diff.rows_added == 2
@@ -464,29 +464,29 @@ class TestIntegration:
     def test_cross_format_csv_vs_parquet(self, tmp):
         src = tmp/"src.csv"; tgt = tmp/"tgt.parquet"
         write_csv(src, BASE); write_parquet(tgt, EVOLVED)
-        result = LakeDiff(source=str(src), target=str(tgt), primary_key="user_id").run()
+        result = DiffLake(source=str(src), target=str(tgt), primary_key="user_id").run()
         assert result.row_diff.rows_added == 2
 
     def test_drift_alerts_populated(self, tmp):
         src = tmp/"src.parquet"; tgt = tmp/"tgt.parquet"
         write_parquet(src, BASE)
         write_parquet(tgt, {**BASE,"revenue":[v*3 for v in BASE["revenue"]]})
-        result = LakeDiff(source=str(src), target=str(tgt), drift_threshold=0.10).run()
+        result = DiffLake(source=str(src), target=str(tgt), drift_threshold=0.10).run()
         assert len(result.drift_alerts) > 0
 
     def test_elapsed_seconds(self, base_p, evol_p):
-        result = LakeDiff(source=str(base_p), target=str(evol_p)).run()
+        result = DiffLake(source=str(base_p), target=str(evol_p)).run()
         assert result.elapsed_seconds is not None and result.elapsed_seconds > 0
 
     def test_composite_end_to_end(self, comp1_p, comp2_p):
-        result = LakeDiff(source=str(comp1_p), target=str(comp2_p),
+        result = DiffLake(source=str(comp1_p), target=str(comp2_p),
                           primary_key="tenant_id,order_id,event_date").run()
         assert result.row_diff.key_based_diff
         assert result.row_diff.rows_added >= 1
         assert result.row_diff.rows_removed >= 1
 
     def test_sample_size_no_crash(self, base_p):
-        result = LakeDiff(source=str(base_p), target=str(base_p), mode="stats",
+        result = DiffLake(source=str(base_p), target=str(base_p), mode="stats",
                           sample_size=3).run()
         assert len(result.stats_diff.column_diffs) > 0
 
@@ -496,7 +496,7 @@ class TestIntegration:
         write_parquet(src_dir/"part-000.parquet", {"id":[1,2,3],"val":["a","b","c"]})
         write_parquet(src_dir/"part-001.parquet", {"id":[4,5],"val":["d","e"]})
         write_parquet(tgt_dir/"part-000.parquet", {"id":[1,2,3,4,5,6],"val":["a","b","c","d","e","f"]})
-        result = LakeDiff(source=str(src_dir), target=str(tgt_dir),
+        result = DiffLake(source=str(src_dir), target=str(tgt_dir),
                           mode="rows", primary_key="id").run()
         assert result.row_diff.row_count_before == 5
         assert result.row_diff.rows_added == 1
@@ -508,7 +508,7 @@ class TestIntegration:
 
 class TestReporters:
     def _run(self, base_p, evol_p):
-        return LakeDiff(source=str(base_p), target=str(evol_p),
+        return DiffLake(source=str(base_p), target=str(evol_p),
                         primary_key="user_id", drift_threshold=0.10).run()
 
     def test_json_structure(self, tmp, base_p, evol_p):
@@ -767,11 +767,11 @@ class TestNewFeatures:
         write_parquet(src, BASE)
         write_parquet(tgt, {**BASE, "revenue": [v * 3 for v in BASE["revenue"]]})
         # Without ignore — revenue should drift
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats",
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats",
                           drift_threshold=0.10).run()
         assert "revenue" in result.stats_diff.drifted_columns
         # With ignore — revenue should not appear in stats at all
-        result2 = LakeDiff(source=str(src), target=str(tgt), mode="stats",
+        result2 = DiffLake(source=str(src), target=str(tgt), mode="stats",
                            drift_threshold=0.10,
                            ignore_columns=["revenue"]).run()
         col_names = [d.column for d in result2.stats_diff.column_diffs]
@@ -795,7 +795,7 @@ class TestNewFeatures:
         write_ts(src, ["2024-01-01", "2024-01-02", "2024-01-03"])
         write_ts(tgt, ["2024-01-05", "2024-01-06", "2024-01-07"])
 
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats").run()
         dt_diff = next((d for d in result.stats_diff.column_diffs
                         if d.column == "created_at"), None)
         assert dt_diff is not None
@@ -818,7 +818,7 @@ class TestNewFeatures:
         write_ts(src, ["2024-01-01", "2024-01-02", "2024-01-03"])
         write_ts(tgt, ["2024-06-01", "2024-06-02", "2024-06-03"])  # 5 month shift
 
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats").run()
         dt_diff = next((d for d in result.stats_diff.column_diffs
                         if d.column == "event_ts"), None)
         assert dt_diff is not None
@@ -888,7 +888,7 @@ class TestNewFeatures:
     def test_limit_restricts_rows(self, tmp):
         src = tmp / "src.parquet"
         write_parquet(src, BASE)  # 5 rows
-        result = LakeDiff(source=str(src), target=str(src),
+        result = DiffLake(source=str(src), target=str(src),
                           mode="stats", limit=3).run()
         # Stats should only cover 3 rows
         assert result.stats_diff.column_diffs  # should still compute
@@ -1003,7 +1003,7 @@ class TestBatchedStats:
         tgt_data = {"id": [1, 2, 3, 4, 5], "revenue": [11.0, 22.0, 33.0, 44.0, 55.0]}
         write_parquet(tmp_path / "a.parquet", src_data)
         write_parquet(tmp_path / "b.parquet", tgt_data)
-        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+        result = DiffLake(source=str(tmp_path / "a.parquet"),
                           target=str(tmp_path / "b.parquet"),
                           mode="stats").run()
         rev = next(d for d in result.stats_diff.column_diffs if d.column == "revenue")
@@ -1018,7 +1018,7 @@ class TestBatchedStats:
         tgt_data = {"id": [1, 2, 3], "status": ["active", "suspended", "churned"]}
         write_parquet(tmp_path / "a.parquet", src_data)
         write_parquet(tmp_path / "b.parquet", tgt_data)
-        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+        result = DiffLake(source=str(tmp_path / "a.parquet"),
                           target=str(tmp_path / "b.parquet"),
                           mode="stats").run()
         status = next(d for d in result.stats_diff.column_diffs if d.column == "status")
@@ -1032,7 +1032,7 @@ class TestBatchedStats:
         tgt_data = {"id": [1, 2, 3], "val": [None, None, None]}
         write_parquet(tmp_path / "a.parquet", src_data)
         write_parquet(tmp_path / "b.parquet", tgt_data)
-        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+        result = DiffLake(source=str(tmp_path / "a.parquet"),
                           target=str(tmp_path / "b.parquet"),
                           mode="stats").run()
         assert result.stats_diff.column_diffs  # should have results
@@ -1061,7 +1061,7 @@ class TestBatchedStats:
         tgt_data = {"val": [1.0, 2.0, 3.0, 4.0]}
         write_parquet(tmp_path / "a.parquet", src_data)
         write_parquet(tmp_path / "b.parquet", tgt_data)
-        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+        result = DiffLake(source=str(tmp_path / "a.parquet"),
                           target=str(tmp_path / "b.parquet"),
                           mode="stats").run()
         col = result.stats_diff.column_diffs[0]
@@ -1074,7 +1074,7 @@ class TestBatchedStats:
         write_parquet(tmp_path / "a.parquet", data)
         mutated = {k: [v * 2 for v in vals] for k, vals in data.items()}
         write_parquet(tmp_path / "b.parquet", mutated)
-        result = LakeDiff(source=str(tmp_path / "a.parquet"),
+        result = DiffLake(source=str(tmp_path / "a.parquet"),
                           target=str(tmp_path / "b.parquet"),
                           mode="stats").run()
         assert len(result.stats_diff.column_diffs) == 15
@@ -1546,7 +1546,7 @@ class TestHtmlReporterV2:
             "score": [15.0, 25.0, 35.0, 45.0, 55.0],
             "cat":   ["a", "b", "c", "d", "e"],
         })
-        return LakeDiff(source=str(src), target=str(tgt),
+        return DiffLake(source=str(src), target=str(tgt),
                         primary_key="id", mode="full").run()
 
     def _render(self, result, tmp_path, offline=False):
@@ -1916,7 +1916,7 @@ class TestLogging:
         log_path = tmp_path / "core.log"
         from difflake.logging_setup import configure
         configure(level="INFO", fmt="text", log_file=str(log_path))
-        LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        DiffLake(source=str(src), target=str(tgt), mode="stats").run()
         import logging
         for h in logging.getLogger("difflake").handlers:
             h.flush()
@@ -1929,7 +1929,7 @@ class TestLogging:
         log_path = tmp_path / "debug.log"
         from difflake.logging_setup import configure
         configure(level="DEBUG", fmt="text", log_file=str(log_path))
-        LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        DiffLake(source=str(src), target=str(tgt), mode="schema").run()
         import logging
         for h in logging.getLogger("difflake").handlers:
             h.flush()
@@ -2156,7 +2156,7 @@ class TestSchemaDiffSummary:
         data = {"id": [1, 2], "name": ["a", "b"]}
         write_parquet(src, data)
         write_parquet(tgt, data)
-        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="schema").run()
         assert result.schema_diff.summary() == "No schema changes"
 
     def test_summary_added(self, tmp_path):
@@ -2164,7 +2164,7 @@ class TestSchemaDiffSummary:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, {"id": [1, 2]})
         write_parquet(tgt, {"id": [1, 2], "score": [0.1, 0.2]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="schema").run()
         summary = result.schema_diff.summary()
         assert "+1 added" in summary
 
@@ -2173,7 +2173,7 @@ class TestSchemaDiffSummary:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, {"id": [1, 2], "score": [0.1, 0.2]})
         write_parquet(tgt, {"id": [1, 2]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="schema").run()
         summary = result.schema_diff.summary()
         assert "-1 removed" in summary
 
@@ -2182,7 +2182,7 @@ class TestSchemaDiffSummary:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, {"id": [1, 2], "val": [1, 2]})
         write_parquet(tgt, {"id": [1, 2], "val": [1.0, 2.0]})
-        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="schema").run()
         summary = result.schema_diff.summary()
         # May or may not flag integer→double depending on DuckDB; just check it runs
         assert isinstance(summary, str)
@@ -2196,7 +2196,7 @@ class TestMarkdownReporter:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, src_data)
         write_parquet(tgt, tgt_data)
-        return LakeDiff(source=str(src), target=str(tgt), **kwargs).run()
+        return DiffLake(source=str(src), target=str(tgt), **kwargs).run()
 
     def test_no_schema_changes_renders(self, tmp_path):
         from difflake.reporters.markdown_reporter import MarkdownReporter
@@ -2280,7 +2280,7 @@ class TestCliReporterVerbose:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, src_data)
         write_parquet(tgt, tgt_data)
-        result = LakeDiff(
+        result = DiffLake(
             source=str(src), target=str(tgt),
             primary_key="id", mode="full",
         ).run()
@@ -2295,7 +2295,7 @@ class TestCliReporterVerbose:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, data)
         write_parquet(tgt, data)
-        result = LakeDiff(source=str(src), target=str(tgt), mode="stats").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="stats").run()
         CliReporter(result, verbose=False).render()
 
 
@@ -2475,7 +2475,7 @@ class TestCliSummaryLine:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, src_data)
         write_parquet(tgt, tgt_data)
-        return LakeDiff(source=str(src), target=str(tgt), **kwargs).run()
+        return DiffLake(source=str(src), target=str(tgt), **kwargs).run()
 
     def test_summary_with_removed_column(self, tmp_path):
         from difflake.cli import _summary_line
@@ -2520,7 +2520,7 @@ class TestCliReporterSchemaChanges:
         tgt = tmp_path / "b.parquet"
         write_parquet(src, src_data)
         write_parquet(tgt, tgt_data)
-        return LakeDiff(source=str(src), target=str(tgt), **kwargs).run()
+        return DiffLake(source=str(src), target=str(tgt), **kwargs).run()
 
     def test_render_removed_columns(self, tmp_path):
         from difflake.reporters.cli_reporter import CliReporter
@@ -2542,14 +2542,14 @@ class TestCliReporterSchemaChanges:
             csv_mod.writer(f).writerows([["id", "val"], ["1", "10"], ["2", "20"]])
         with open(tgt, "w", newline="") as f:
             csv_mod.writer(f).writerows([["id", "val"], ["1", "hello"], ["2", "world"]])
-        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="schema").run()
         CliReporter(result).render()
 
     def test_render_order_changed(self, tmp_path):
         from difflake.reporters.cli_reporter import CliReporter
         write_parquet(tmp_path / "a.parquet", {"id": [1], "name": ["x"], "val": [1.0]})
         write_parquet(tmp_path / "b.parquet", {"val": [1.0], "name": ["x"], "id": [1]})
-        result = LakeDiff(
+        result = DiffLake(
             source=str(tmp_path / "a.parquet"),
             target=str(tmp_path / "b.parquet"),
             mode="schema",
@@ -2584,7 +2584,7 @@ class TestMarkdownReporterExtended:
             csv_mod.writer(f).writerows([["id", "val"], ["1", "10"], ["2", "20"]])
         with open(tgt, "w", newline="") as f:
             csv_mod.writer(f).writerows([["id", "val"], ["1", "hello"], ["2", "world"]])
-        result = LakeDiff(source=str(src), target=str(tgt), mode="schema").run()
+        result = DiffLake(source=str(src), target=str(tgt), mode="schema").run()
         md = MarkdownReporter(result).render()
         assert isinstance(md, str)
 
@@ -2593,7 +2593,7 @@ class TestMarkdownReporterExtended:
         # "user_name" → "username" has high Jaro-Winkler similarity → rename detected
         write_parquet(tmp_path / "a.parquet", {"id": [1, 2], "user_name": ["a", "b"]})
         write_parquet(tmp_path / "b.parquet", {"id": [1, 2], "username": ["a", "b"]})
-        result = LakeDiff(
+        result = DiffLake(
             source=str(tmp_path / "a.parquet"),
             target=str(tmp_path / "b.parquet"),
             mode="schema",
@@ -2619,7 +2619,7 @@ class TestCliReporterFmtNum:
         from difflake.reporters.cli_reporter import CliReporter
         write_parquet(tmp_path / "a.parquet", {"id": [1, 2], "user_name": ["a", "b"]})
         write_parquet(tmp_path / "b.parquet", {"id": [1, 2], "username": ["a", "b"]})
-        result = LakeDiff(
+        result = DiffLake(
             source=str(tmp_path / "a.parquet"),
             target=str(tmp_path / "b.parquet"),
             mode="schema",

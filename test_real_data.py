@@ -306,44 +306,44 @@ def section_python_api():
     sep("5. Python API")
 
     py("API basic diff",
-       "from difflake import LakeDiff; "
-       f"r = LakeDiff(source='{JAN}', target='{FEB}', mode='stats', sample_size=100000).run(); "
+       "from difflake import DiffLake; "
+       f"r = DiffLake(source='{JAN}', target='{FEB}', mode='stats', sample_size=100000).run(); "
        "assert r.stats_diff is not None; "
        "assert r.elapsed_seconds > 0; "
        "print('  drifted:', r.stats_diff.drifted_columns[:3], 'elapsed:', round(r.elapsed_seconds,1),'s')")
 
     py("API ignore_columns",
-       "from difflake import LakeDiff; "
-       f"r = LakeDiff(source='{JAN}', target='{FEB}', mode='stats', sample_size=100000, "
+       "from difflake import DiffLake; "
+       f"r = DiffLake(source='{JAN}', target='{FEB}', mode='stats', sample_size=100000, "
        "ignore_columns=['tpep_pickup_datetime','tpep_dropoff_datetime']).run(); "
        "cols = [d.column for d in r.stats_diff.column_diffs]; "
        "assert 'tpep_pickup_datetime' not in cols; "
        "print('  excluded timestamps OK, cols:', cols[:4])")
 
     py("API where filter",
-       "from difflake import LakeDiff; "
-       f"r = LakeDiff(source='{JAN}', target='{FEB}', mode='stats', "
+       "from difflake import DiffLake; "
+       f"r = DiffLake(source='{JAN}', target='{FEB}', mode='stats', "
        "where='payment_type = 1', sample_size=100000).run(); "
        "assert r.stats_diff is not None; "
        "print('  where filter OK, cols:', len(r.stats_diff.column_diffs))")
 
     py("API limit",
-       "from difflake import LakeDiff; "
-       f"r = LakeDiff(source='{JAN}', target='{FEB}', mode='stats', limit=50000).run(); "
+       "from difflake import DiffLake; "
+       f"r = DiffLake(source='{JAN}', target='{FEB}', mode='stats', limit=50000).run(); "
        "assert r.stats_diff is not None; "
        "print('  limit OK')")
 
     py("API to_json returns string",
-       "from difflake import LakeDiff; import json; "
-       f"r = LakeDiff(source='{JAN}', target='{FEB}', mode='schema').run(); "
+       "from difflake import DiffLake; import json; "
+       f"r = DiffLake(source='{JAN}', target='{FEB}', mode='schema').run(); "
        "s = r.to_json(); "
        "assert isinstance(s, str); "
        "d = json.loads(s); assert 'schema_diff' in d; "
        "print('  to_json() OK')")
 
     py("API schema_diff has correct fields",
-       "from difflake import LakeDiff; "
-       f"r = LakeDiff(source='{JAN}', target='{FEB}', mode='schema').run(); "
+       "from difflake import DiffLake; "
+       f"r = DiffLake(source='{JAN}', target='{FEB}', mode='schema').run(); "
        "sd = r.schema_diff; "
        "assert hasattr(sd, 'added_columns'); "
        "assert hasattr(sd, 'removed_columns'); "

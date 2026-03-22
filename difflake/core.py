@@ -1,5 +1,5 @@
 """
-LakeDiff — main orchestrator.
+DiffLake — main orchestrator.
 
 Wires together: DuckDB connection → view registration → schema/stats/row differs → report.
 
@@ -26,15 +26,15 @@ log = get_logger(__name__)
 DiffMode = Literal["full", "schema", "stats", "rows"]
 
 
-class LakeDiff:
+class DiffLake:
     """
-    Primary entry point for the LakeDiff library.
+    Primary entry point for the DiffLake library.
 
     Usage::
 
-        from difflake import LakeDiff
+        from difflake import DiffLake
 
-        result = LakeDiff(
+        result = DiffLake(
             source="data/v1/users.parquet",
             target="data/v2/users.parquet",
             primary_key="user_id",
@@ -44,7 +44,7 @@ class LakeDiff:
 
     Cloud / remote paths work identically::
 
-        LakeDiff(
+        DiffLake(
             source="s3://my-bucket/data/v1/users.parquet",
             target="s3://my-bucket/data/v2/users.parquet",
             primary_key="user_id",
@@ -52,9 +52,9 @@ class LakeDiff:
 
     Delta Lake, Iceberg, Avro::
 
-        LakeDiff(source="path/to/delta_table/", target="path/to/delta_table_v2/").run()
-        LakeDiff(source="path/to/iceberg_table", target="...", source_format="iceberg").run()
-        LakeDiff(source="file.avro", target="file2.avro").run()
+        DiffLake(source="path/to/delta_table/", target="path/to/delta_table_v2/").run()
+        DiffLake(source="path/to/iceberg_table", target="...", source_format="iceberg").run()
+        DiffLake(source="file.avro", target="file2.avro").run()
     """
 
     def __init__(
