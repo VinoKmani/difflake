@@ -16,7 +16,7 @@ pip install difflake
 difflake compare old.parquet new.parquet
 ```
 
-That's it. No config files, no database, no server. Works on Parquet, CSV, JSON, Delta Lake, S3, GCS, Azure, and more.
+That's it. No config files, no database, no server. Works on Parquet, CSV, JSON, Delta Lake, and more.
 
 ---
 
@@ -42,17 +42,6 @@ difflake validate users.parquet --min-rows 10000 --not-null user_id --unique ema
 # Run ad-hoc SQL against any file
 difflake query users.parquet "SELECT country, COUNT(*) FROM t GROUP BY 1 ORDER BY 2 DESC"
 ```
-
----
-
-## How is it different from X?
-
-| Tool | What it does | How difflake differs |
-|---|---|---|
-| Great Expectations / Soda | Validate data against rules you write | difflake **discovers** what changed — no rules to write |
-| dbt tests | Assert invariants after a model runs | difflake diffs two snapshots, no dbt project needed |
-| pandas / polars | Pull data into memory and compare | difflake never loads data into Python — runs inside DuckDB, works at any scale |
-| custom SQL scripts | Ad-hoc diffing with hand-rolled queries | difflake is a one-liner that handles schema, stats, and rows together |
 
 ---
 
@@ -440,9 +429,11 @@ difflake compare jan.parquet feb.parquet --limit 1000000
 
 ## Cloud storage
 
-Pass cloud URIs directly as paths. Auth is via environment variables.
+### AWS S3 ✅ tested
 
-**AWS S3**
+Verified against the [Ookla Open Data](https://github.com/teamookla/ookla-open-data) public S3 bucket — 3.7M row Parquet file, schema diff, stats diff, row count, and exit codes all confirmed working.
+
+Public buckets work with no credentials. For private buckets:
 
 ```bash
 export AWS_ACCESS_KEY_ID="AKIA..."
@@ -450,9 +441,18 @@ export AWS_SECRET_ACCESS_KEY="your-secret"
 export AWS_DEFAULT_REGION="us-east-1"
 
 difflake compare s3://bucket/v1/users.parquet s3://bucket/v2/users.parquet
+difflake compare s3://bucket/v1/users.parquet s3://bucket/v2/users.parquet --mode stats --sample 500000
 ```
 
-**Google Cloud Storage**
+MinIO / S3-compatible stores:
+
+```bash
+export AWS_ENDPOINT_URL="https://minio.mycompany.com"
+```
+
+### Google Cloud Storage ⚠️ untested
+
+The implementation follows the same DuckDB `httpfs` pattern as S3 and uses the standard `GOOGLE_APPLICATION_CREDENTIALS` env var. It should work, but we have not tested against a real GCS bucket yet.
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
@@ -460,7 +460,11 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 difflake compare gs://bucket/v1/users.parquet gs://bucket/v2/users.parquet
 ```
 
-**Azure Blob Storage**
+If you test this and it works (or doesn't), please [open an issue](https://github.com/VinoKmani/difflake/issues) so we can update this note.
+
+### Azure Blob Storage ⚠️ untested
+
+Same situation — the code is in place, but not tested against a real Azure endpoint.
 
 ```bash
 export AZURE_STORAGE_ACCOUNT="mystorageaccount"
@@ -469,15 +473,12 @@ export AZURE_STORAGE_KEY="your-key=="
 difflake compare az://container/v1/users.parquet az://container/v2/users.parquet
 ```
 
-**Cross-cloud diff**
+ADLS Gen2:
 
 ```bash
-# Local vs S3 — is your local copy in sync with prod?
-difflake compare ./users.parquet s3://prod-bucket/users.parquet --mode schema
-
-# S3 → GCS migration check
-difflake compare s3://old-bucket/users.parquet gs://new-bucket/users.parquet \
-  --mode full --sample 500000
+difflake compare \
+  "abfss://bronze@myaccount.dfs.core.windows.net/tables/v1/" \
+  "abfss://bronze@myaccount.dfs.core.windows.net/tables/v2/"
 ```
 
 ---
