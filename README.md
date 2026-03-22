@@ -109,9 +109,14 @@ curl -L -o feb.parquet \
 Confirm everything is working:
 
 ```bash
-difflake show jan.parquet
-# Prints: schema, row count, and first 5 rows
+difflake show jan.parquet --schema
 ```
+
+A few things worth knowing about this dataset before running examples:
+
+- **Column names are PascalCase** — `VendorID`, `RatecodeID`, `PULocationID`, not `vendor_id`. Commands are case-sensitive.
+- **VendorID has only 2 unique values** — it is not a good primary key on its own. Use a composite key like `--key VendorID,tpep_pickup_datetime` for row-level diff.
+- **Schema changes between months** — January and February have type differences (`BIGINT` → `INTEGER` on several columns) and a column rename (`airport_fee` → `Airport_fee`). This makes it a realistic test dataset, but don't be surprised when drift alerts fire.
 
 ---
 
@@ -142,26 +147,26 @@ difflake diff SOURCE TARGET [options]   # alias — works identically
 | `--config FILE` | — | Load settings from a YAML file |
 
 ```bash
-# Full diff — schema + stats + row-level changes
-difflake compare jan.parquet feb.parquet --key vendor_id
-
 # Schema only — instant, reads no row data
 difflake compare jan.parquet feb.parquet --mode schema
+
+# Stats diff — which columns drifted?
+difflake compare jan.parquet feb.parquet --mode stats
 
 # Tighter threshold — flag anything that drifted more than 5%
 difflake compare jan.parquet feb.parquet --mode stats --threshold 0.05
 
-# Exclude audit columns that always differ
-difflake compare jan.parquet feb.parquet --ignore-columns updated_at,_loaded_at
+# Row-level diff — VendorID alone is low-cardinality, use a composite key
+difflake compare jan.parquet feb.parquet --key VendorID,tpep_pickup_datetime
+
+# Exclude columns you don't want to diff
+difflake compare jan.parquet feb.parquet --ignore-columns airport_fee,congestion_surcharge
 
 # Save an HTML report
 difflake compare jan.parquet feb.parquet --output html --out report.html
 
 # Save a JSON report for downstream automation
 difflake compare jan.parquet feb.parquet --output json --out report.json
-
-# Composite primary key
-difflake compare jan.parquet feb.parquet --key vendor_id,pickup_datetime
 ```
 
 ---
@@ -203,7 +208,7 @@ difflake show jan.parquet --order-by fare_amount DESC --rows 5
 difflake show jan.parquet --where "fare_amount > 100" --stats
 
 # Specific columns only
-difflake show jan.parquet --columns vendor_id,fare_amount,trip_distance
+difflake show jan.parquet --columns VendorID,fare_amount,trip_distance
 ```
 
 ---
@@ -220,7 +225,7 @@ difflake validate FILE [checks] [options]
 # Multiple checks in one command
 difflake validate jan.parquet \
   --min-rows 1000 \
-  --not-null vendor_id \
+  --not-null VendorID \
   --unique trip_id \
   --min-val fare_amount:0 \
   --max-val passenger_count:9 \
@@ -290,7 +295,7 @@ difflake query jan.parquet \
 
 # Check for nulls across every column
 difflake query jan.parquet \
-  "SELECT COUNT(*) - COUNT(vendor_id) AS null_vendor,
+  "SELECT COUNT(*) - COUNT(VendorID) AS null_vendor,
           COUNT(*) - COUNT(fare_amount) AS null_fare
    FROM t"
 
@@ -299,7 +304,7 @@ difflake query jan.parquet "SELECT COUNT(*) FROM t WHERE fare_amount < 0"
 
 # Export results to CSV
 difflake query jan.parquet \
-  "SELECT vendor_id, fare_amount, trip_distance FROM t WHERE fare_amount > 100" \
+  "SELECT VendorID, fare_amount, trip_distance FROM t WHERE fare_amount > 100" \
   --output csv --out high_fares.csv
 
 # Works on all supported formats — CSV, JSON, Delta Lake, S3, and more
@@ -354,14 +359,11 @@ Identifies exactly which rows were added, removed, or changed between two datase
 # Count-only diff — no key needed
 difflake compare jan.parquet feb.parquet --mode rows
 
-# Key-based — shows exactly which rows changed and what changed in them
-difflake compare jan.parquet feb.parquet --mode rows --key vendor_id
-
-# Composite key
-difflake compare jan.parquet feb.parquet --mode rows --key vendor_id,pickup_datetime
+# Key-based — composite key because VendorID alone has only 2 unique values
+difflake compare jan.parquet feb.parquet --mode rows --key VendorID,tpep_pickup_datetime
 
 # Show sample changed rows inline
-difflake compare jan.parquet feb.parquet --mode rows --key vendor_id --verbose
+difflake compare jan.parquet feb.parquet --mode rows --key VendorID,tpep_pickup_datetime --verbose
 ```
 
 Uses a SQL `FULL OUTER JOIN` inside DuckDB with automatic disk spill — works on files of any size without loading data into memory.
@@ -415,7 +417,7 @@ difflake show jan.parquet --where "fare_amount > 100" --stats
 difflake show jan.parquet --where "trip_distance > 10 AND fare_amount < 5"
 
 # Date range
-difflake compare jan.parquet feb.parquet --where "pickup_datetime >= '2023-01-15'"
+difflake compare jan.parquet feb.parquet --where "tpep_pickup_datetime >= '2023-01-15'"
 ```
 
 ### Sampling
@@ -598,7 +600,7 @@ from difflake import DiffLake
 result = DiffLake(
     source="jan.parquet",
     target="feb.parquet",
-    primary_key="vendor_id",
+    primary_key=["VendorID", "tpep_pickup_datetime"],
     mode="full",
     drift_threshold=0.15,
     where="payment_type = 1",
@@ -732,10 +734,10 @@ conn.execute("INSTALL delta; INSTALL iceberg; INSTALL avro;")
 **Low-cardinality key error**
 
 ```
-✗ LOW-CARDINALITY KEY: 'vendor_id' has only 2 unique values across 2.4M rows.
+✗ LOW-CARDINALITY KEY: 'VendorID' has only 2 unique values across 3M rows.
 ```
 
-The key column needs to identify rows uniquely, or close to it. A column with 2 unique values across millions of rows would produce a cartesian join explosion. Use a higher-cardinality column or a composite key.
+The key column needs to identify rows uniquely, or close to it. A column with 2 unique values across millions of rows would produce a cartesian join explosion. Use a composite key instead — for the NYC taxi sample data, `--key VendorID,tpep_pickup_datetime` works well.
 
 **Key column not found**
 
