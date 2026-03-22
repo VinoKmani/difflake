@@ -6,6 +6,15 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.1] — 2026-03-22
+
+### Fixed
+
+- Renamed public API class from `LakeDiff` to `DiffLake` — `from difflake import DiffLake` now works as documented.
+- Windows encoding fix: `MarkdownReporter` and HTML report tests now use `encoding="utf-8"` explicitly.
+
+---
+
 ## [1.1.0] — 2026-03-19
 
 ### Added
