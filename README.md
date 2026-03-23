@@ -19,6 +19,8 @@ difflake compare old.parquet new.parquet
 
 No config files. No database. No server. Works on Parquet, CSV, JSON, Delta Lake, and more.
 
+[![asciicast](https://asciinema.org/a/vOotsbeEA6cfbIly.svg)](https://asciinema.org/a/vOotsbeEA6cfbIly)
+
 ---
 
 ## What it does
@@ -594,12 +596,12 @@ Environment variables: `DIFFLAKE_LOG_LEVEL`, `DIFFLAKE_LOG_FORMAT`, `DIFFLAKE_LO
 
 ## Python API
 
-The CLI is a thin wrapper around the `DiffLake` class. Everything available in the CLI is available programmatically.
+The CLI is a thin wrapper around the `LakeDiff` class. Everything available in the CLI is available programmatically.
 
 ```python
-from difflake import DiffLake
+from difflake import LakeDiff
 
-result = DiffLake(
+result = LakeDiff(
     source="jan.parquet",
     target="feb.parquet",
     primary_key=["VendorID", "tpep_pickup_datetime"],
@@ -653,16 +655,16 @@ S3, Delta Lake, and cross-format comparison work the same way:
 
 ```python
 # S3
-DiffLake(
+LakeDiff(
     source="s3://bucket/v1/users.parquet",
     target="s3://bucket/v2/users.parquet",
 ).run()
 
 # Delta Lake
-DiffLake(source="delta_v1/", target="delta_v2/", primary_key="user_id").run()
+LakeDiff(source="delta_v1/", target="delta_v2/", primary_key="user_id").run()
 
 # CSV vs Parquet — cross-format is supported
-DiffLake(source="old.csv", target="new.parquet", primary_key="id").run()
+LakeDiff(source="old.csv", target="new.parquet", primary_key="id").run()
 ```
 
 ---
