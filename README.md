@@ -19,8 +19,6 @@ difflake compare old.parquet new.parquet
 
 No config files. No database. No server. Works on Parquet, CSV, JSON, Delta Lake, and more.
 
-[![asciicast](https://asciinema.org/a/vOotsbeEA6cfbIly.svg)](https://asciinema.org/a/vOotsbeEA6cfbIly)
-
 ---
 
 ## What it does
