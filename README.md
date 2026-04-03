@@ -19,6 +19,9 @@ difflake compare old.parquet new.parquet
 
 No config files. No database. No server. Works on Parquet, CSV, JSON, Delta Lake, and more.
 
+![difflake demo](docs/demo.gif)
+
+---
 
 ## What it does
 
